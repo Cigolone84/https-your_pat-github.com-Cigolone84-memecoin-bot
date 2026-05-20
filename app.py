@@ -85,51 +85,168 @@ def get_nums(row):
 
 
 # ── AUTO-FETCH MISSING DRAWS ──────────────────────────────────────────────────
-def fetch_draw_for_date(draw_date_str):
-    """Try to scrape 6 lotto numbers for a given date (YYYY-MM-DD) from multiple sources."""
-    d = draw_date_str  # e.g. "2026-05-19"
-    d_pl = d[8:10] + "." + d[5:7] + "." + d[0:4]  # "19.05.2026"
-    headers = {"User-Agent": "Mozilla/5.0"}
+# Polish Lotto (Kumulacja) draws: Tuesday=1, Thursday=3, Saturday=5
+_DRAW_WEEKDAYS = {1, 3, 5}
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+}
 
-    sources = [
-        f"https://www.wynikilotto.net.pl/lotto/wyniki/{d[0:4]}/{d[5:7]}/{d[8:10]}/",
-        f"https://pewniaki.pl/wyniki-lotto/{d[0:4]}-{d[5:7]}-{d[8:10]}/",
-    ]
-    pattern = re.compile(r'\b([1-9]|[1-4][0-9])\b')
 
-    for url in sources:
-        try:
-            r = requests.get(url, headers=headers, timeout=8)
-            if r.status_code != 200:
-                continue
-            # find all standalone 1-49 numbers in the page
-            candidates = [int(x) for x in pattern.findall(r.text) if 1 <= int(x) <= 49]
-            # look for a run of 6 unique sorted numbers in 1-49
-            seen = []
-            for n in candidates:
-                if n not in seen:
-                    seen.append(n)
-                if len(seen) == 6:
-                    # validate: at least 4 distinct values, span > 15
-                    s = sorted(seen)
-                    if s[-1] - s[0] > 15:
-                        return s
-                    seen = []
-        except Exception:
-            continue
+def _extract_lotto_nums(html: str):
+    """
+    Try multiple parsing strategies to extract exactly 6 valid lotto numbers (1-49)
+    from an HTML page. Returns sorted list of 6 ints or None.
+    """
+    # Strategy 1: JSON embedded — look for array of 6 numbers 1-49
+    json_pattern = re.compile(r'\[(\s*\d+\s*(?:,\s*\d+\s*){5})\]')
+    for m in json_pattern.finditer(html):
+        parts = [int(x) for x in m.group(1).split(",")]
+        if len(parts) == 6 and all(1 <= x <= 49 for x in parts) and len(set(parts)) == 6:
+            s = sorted(parts)
+            if s[-1] - s[0] > 20:
+                return s
+
+    # Strategy 2: HTML ball elements — spans/divs with class containing "ball" or "liczba"
+    ball_pat = re.compile(
+        r'class="[^"]*(?:ball|liczba|lotto-ball|result-ball|number)[^"]*"[^>]*>\s*(\d{1,2})\s*<',
+        re.IGNORECASE,
+    )
+    ball_nums = []
+    for m in ball_pat.finditer(html):
+        n = int(m.group(1))
+        if 1 <= n <= 49 and n not in ball_nums:
+            ball_nums.append(n)
+        if len(ball_nums) == 6:
+            s = sorted(ball_nums)
+            if s[-1] - s[0] > 20:
+                return s
+            ball_nums = []
+
+    # Strategy 3: data-number or data-value attributes
+    data_pat = re.compile(r'data-(?:number|value|ball)="(\d{1,2})"', re.IGNORECASE)
+    data_nums = []
+    for m in data_pat.finditer(html):
+        n = int(m.group(1))
+        if 1 <= n <= 49 and n not in data_nums:
+            data_nums.append(n)
+        if len(data_nums) == 6:
+            s = sorted(data_nums)
+            if s[-1] - s[0] > 20:
+                return s
+            data_nums = []
+
+    # Strategy 4: sliding window of 6 unique 1-49 numbers (fallback, conservative)
+    all_nums = [int(x) for x in re.findall(r'\b([1-9]|[1-4]\d)\b', html)]
+    window = []
+    for n in all_nums:
+        if n not in window:
+            window.append(n)
+        if len(window) == 6:
+            s = sorted(window)
+            # strict validation: span > 25, all unique, no obvious date numbers
+            if s[-1] - s[0] > 25 and s[5] <= 49:
+                return s
+            window.pop(0)
+
     return None
 
 
+def fetch_draw_for_date(draw_date_str: str):
+    """
+    Fetch 6 Kumulacja numbers for a given date (YYYY-MM-DD).
+    Tries multiple Polish lotto result sites. Returns sorted list[int] or None.
+    """
+    y, m, d = draw_date_str[:4], draw_date_str[5:7], draw_date_str[8:10]
+
+    urls = [
+        # wynikilotto.net.pl — main source
+        f"https://www.wynikilotto.net.pl/lotto/wyniki/{y}/{m}/{d}/",
+        # pewniaki.pl — backup
+        f"https://pewniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
+        # lotto.pl — official (HTML, might block bots)
+        f"https://www.lotto.pl/lotto/wyniki-i-wygrane/wyniki-losowania/{y}-{m}-{d}",
+        # totalniaki.pl
+        f"https://totalniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
+    ]
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+            result = _extract_lotto_nums(resp.text)
+            if result:
+                return result
+        except Exception:
+            continue
+
+    return None
+
+
+def get_missing_draw_dates(df) -> list:
+    """
+    Returns list of date strings (YYYY-MM-DD) that should have a draw
+    but are not yet in the database. Uses Tue/Thu/Sat schedule.
+    """
+    known_dates = set(str(x)[:10] for x in df["date"] if str(x)[:10] != "nan")
+    last_date_str = str(df.iloc[-1]["date"])[:10]
+    try:
+        last_date = date.fromisoformat(last_date_str)
+    except Exception:
+        return []
+
+    today = date.today()
+    missing = []
+    d = last_date + timedelta(days=1)
+    while d <= today:
+        if d.weekday() in _DRAW_WEEKDAYS and str(d) not in known_dates:
+            missing.append(str(d))
+        d += timedelta(days=1)
+    return missing
+
+
+def auto_update_draws(df):
+    """
+    Called at app startup: silently fetch any missing draws and update CSV.
+    Returns (updated_df, n_added, [messages]).
+    """
+    missing = get_missing_draw_dates(df)
+    if not missing:
+        return df, 0, []
+
+    added, messages = 0, []
+    current_df = df.copy()
+
+    for draw_date in missing:
+        nums = fetch_draw_for_date(draw_date)
+        if nums and len(set(nums)) == 6 and all(1 <= n <= 49 for n in nums):
+            next_draw_num = int(current_df.iloc[-1]["draw"]) + 1
+            current_df = add_draw_to_csv(current_df, next_draw_num, draw_date, sorted(nums))
+            messages.append(
+                f"Draw #{next_draw_num} ({draw_date}): "
+                + " ".join(f"{n:02d}" for n in sorted(nums))
+            )
+            added += 1
+
+    return current_df, added, messages
+
+
 def add_draw_to_csv(df, draw_num, draw_date, nums):
-    """Append a new draw row and save CSV. Returns updated df."""
+    """Append a new draw row, save CSV, return updated df."""
     new_row = {
-        "draw": int(draw_num),
-        "date": str(draw_date),
+        "draw": int(draw_num), "date": str(draw_date),
         "n1": nums[0], "n2": nums[1], "n3": nums[2],
         "n4": nums[3], "n5": nums[4], "n6": nums[5],
     }
     df_new = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df_new = df_new.sort_values("draw").drop_duplicates(subset=["draw"]).reset_index(drop=True)
+    df_new = (df_new.sort_values("draw")
+                    .drop_duplicates(subset=["draw"])
+                    .reset_index(drop=True))
     df_new.to_csv("lotto_draws.csv", index=False)
     return df_new
 
@@ -460,43 +577,26 @@ def render_sidebar(df):
 
         st.markdown("---")
 
-        # ── Auto-fetch
-        st.markdown("### 🌐 Auto-fetch")
-        st.caption("Cerca automaticamente le estrazioni mancanti dal web.")
-        fetch_days = st.slider("Cerca ultimi N giorni", 1, 14, 7)
-        if st.button("🔍 Cerca estrazioni", use_container_width=True):
-            found = 0
-            prog = st.progress(0)
-            start_date = date.today() - timedelta(days=fetch_days)
-            draw_dates = []
-            d = start_date
-            while d <= date.today():
-                draw_dates.append(d)
-                d += timedelta(days=1)
-
-            existing_dates = set(str(df["date"]).replace(" ", "")[:10]
-                                 for _ in [1])  # set of known dates
-            existing_dates = set(str(x)[:10] for x in df["date"])
-
-            current_df = df.copy()
-            for idx, dd in enumerate(draw_dates):
-                prog.progress((idx + 1) / len(draw_dates))
-                dd_str = str(dd)
-                if dd_str in existing_dates:
-                    continue
-                nums = fetch_draw_for_date(dd_str)
-                if nums and len(set(nums)) == 6:
-                    next_n = int(current_df.iloc[-1]["draw"]) + 1
-                    current_df = add_draw_to_csv(current_df, next_n, dd_str, sorted(nums))
-                    found += 1
-
-            prog.empty()
-            if found:
-                st.success(f"✅ Trovate {found} nuove estrazioni!")
-                st.cache_data.clear()
-                st.rerun()
+        # ── Auto-fetch manuale (forza ricerca)
+        st.markdown("### 🌐 Forza aggiornamento")
+        st.caption("Riesegui la ricerca online delle draw mancanti.")
+        if st.button("🔍 Cerca ora", use_container_width=True):
+            missing = get_missing_draw_dates(df)
+            if not missing:
+                st.success("✅ Database già aggiornato!")
             else:
-                st.info("Nessuna nuova estrazione trovata (o date già presenti).")
+                with st.spinner(f"Cerco {len(missing)} draw…"):
+                    _, n_added, messages = auto_update_draws(df)
+                if n_added:
+                    for m in messages:
+                        st.success(m)
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.warning(
+                        f"Nessuna trovata online per: {', '.join(missing)}\n"
+                        "Inseriscile manualmente sopra."
+                    )
 
         st.markdown("---")
         st.caption("💡 Se l'auto-fetch fallisce, inserisci i numeri manualmente sopra.")
@@ -959,6 +1059,25 @@ def tab_dati(df):
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     df = load_draws()
+
+    # ── AUTO-UPDATE ON STARTUP ────────────────────────────────────────────────
+    missing_dates = get_missing_draw_dates(df)
+    if missing_dates:
+        with st.spinner(f"🔄 Cerco {len(missing_dates)} draw mancanti…"):
+            df_updated, n_added, messages = auto_update_draws(df)
+        if n_added:
+            st.cache_data.clear()
+            df = df_updated
+            banner = "  \n".join(f"✅ **{m}**" for m in messages)
+            st.success(f"🆕 {n_added} draw aggiunta/e automaticamente!\n\n{banner}")
+        elif missing_dates:
+            next_expected = missing_dates[0]
+            st.info(
+                f"⏳ Nessuna nuova draw trovata online. "
+                f"Prossima attesa: **{next_expected}** "
+                f"(oppure inseriscila manualmente dal sidebar)."
+            )
+    # ─────────────────────────────────────────────────────────────────────────
 
     render_sidebar(df)
     render_header(df)
