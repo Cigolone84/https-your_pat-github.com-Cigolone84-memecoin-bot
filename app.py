@@ -1,6 +1,6 @@
 """
-Lotto NO PLUS — v4
-Walk-forward backtest | Experimental-data-driven 2+2+2+2 strategy | 13 Laws
+Lotto NO PLUS — v5
+Walk-forward backtest | 2+2+2+2 strategy | 13 Laws | Auto-fetch | Verifica risultati
 """
 import streamlit as st
 import pandas as pd
@@ -10,11 +10,13 @@ import plotly.express as px
 from itertools import combinations
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
+import requests, re
+from datetime import date, timedelta
 import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="Lotto NO PLUS", page_icon="🎯", layout="wide",
-                   initial_sidebar_state="collapsed")
+                   initial_sidebar_state="expanded")
 
 # ── THEME ─────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -38,7 +40,8 @@ st.markdown("""
               padding:.5rem 1rem; margin:.3rem 0; }
   .miss-box { background:#3b0d0d; border:1px solid #e74c3c; border-radius:8px;
               padding:.5rem 1rem; margin:.3rem 0; }
-  section[data-testid="stSidebar"] { display:none; }
+  section[data-testid="stSidebar"] { background:#0d1117 !important; }
+  section[data-testid="stSidebar"] .block-container { padding:1rem; }
   div[data-testid="stTabs"] button { color:#8b949e !important; }
   div[data-testid="stTabs"] button[aria-selected="true"] { color:#f0a500 !important;
     border-bottom:2px solid #f0a500 !important; }
@@ -79,6 +82,56 @@ def load_draws():
 
 def get_nums(row):
     return sorted([int(row[f"n{i}"]) for i in range(1, 7)])
+
+
+# ── AUTO-FETCH MISSING DRAWS ──────────────────────────────────────────────────
+def fetch_draw_for_date(draw_date_str):
+    """Try to scrape 6 lotto numbers for a given date (YYYY-MM-DD) from multiple sources."""
+    d = draw_date_str  # e.g. "2026-05-19"
+    d_pl = d[8:10] + "." + d[5:7] + "." + d[0:4]  # "19.05.2026"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    sources = [
+        f"https://www.wynikilotto.net.pl/lotto/wyniki/{d[0:4]}/{d[5:7]}/{d[8:10]}/",
+        f"https://pewniaki.pl/wyniki-lotto/{d[0:4]}-{d[5:7]}-{d[8:10]}/",
+    ]
+    pattern = re.compile(r'\b([1-9]|[1-4][0-9])\b')
+
+    for url in sources:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            # find all standalone 1-49 numbers in the page
+            candidates = [int(x) for x in pattern.findall(r.text) if 1 <= int(x) <= 49]
+            # look for a run of 6 unique sorted numbers in 1-49
+            seen = []
+            for n in candidates:
+                if n not in seen:
+                    seen.append(n)
+                if len(seen) == 6:
+                    # validate: at least 4 distinct values, span > 15
+                    s = sorted(seen)
+                    if s[-1] - s[0] > 15:
+                        return s
+                    seen = []
+        except Exception:
+            continue
+    return None
+
+
+def add_draw_to_csv(df, draw_num, draw_date, nums):
+    """Append a new draw row and save CSV. Returns updated df."""
+    new_row = {
+        "draw": int(draw_num),
+        "date": str(draw_date),
+        "n1": nums[0], "n2": nums[1], "n3": nums[2],
+        "n4": nums[3], "n5": nums[4], "n6": nums[5],
+    }
+    df_new = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df_new = df_new.sort_values("draw").drop_duplicates(subset=["draw"]).reset_index(drop=True)
+    df_new.to_csv("lotto_draws.csv", index=False)
+    return df_new
 
 
 # ── 13 LAWS ───────────────────────────────────────────────────────────────────
@@ -368,6 +421,89 @@ def nums_html(nums, pool_info=None, actual=None):
     return out
 
 
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+def render_sidebar(df):
+    with st.sidebar:
+        st.markdown("## 🗄️ Database")
+        last = df.iloc[-1]
+        last_draw = int(last["draw"])
+        next_draw = last_draw + 1
+        st.markdown(f"**Ultima draw:** #{last_draw} · {str(last['date'])[:10]}")
+        st.markdown(f"**Tot. draw:** {len(df):,} · **Prossima:** #{next_draw}")
+        st.markdown("---")
+
+        # ── Aggiungi draw manuale
+        st.markdown("### ➕ Aggiungi draw")
+        with st.form("add_draw_form"):
+            col_n, col_d = st.columns(2)
+            inp_draw = col_n.number_input("N° draw", min_value=1, value=next_draw, step=1)
+            inp_date = col_d.date_input("Data", value=date.today())
+            c1, c2, c3 = st.columns(3)
+            c4, c5, c6 = st.columns(3)
+            n1 = c1.number_input("N1", 1, 49, value=1, key="s1")
+            n2 = c2.number_input("N2", 1, 49, value=2, key="s2")
+            n3 = c3.number_input("N3", 1, 49, value=3, key="s3")
+            n4 = c4.number_input("N4", 1, 49, value=4, key="s4")
+            n5 = c5.number_input("N5", 1, 49, value=5, key="s5")
+            n6 = c6.number_input("N6", 1, 49, value=6, key="s6")
+            submitted = st.form_submit_button("✅ Salva draw", use_container_width=True)
+
+        if submitted:
+            nums = sorted([n1, n2, n3, n4, n5, n6])
+            if len(set(nums)) < 6:
+                st.error("I 6 numeri devono essere tutti diversi!")
+            else:
+                add_draw_to_csv(df, inp_draw, inp_date, nums)
+                st.success(f"Draw #{inp_draw} aggiunto: {' '.join(f'{x:02d}' for x in nums)}")
+                st.cache_data.clear()
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── Auto-fetch
+        st.markdown("### 🌐 Auto-fetch")
+        st.caption("Cerca automaticamente le estrazioni mancanti dal web.")
+        fetch_days = st.slider("Cerca ultimi N giorni", 1, 14, 7)
+        if st.button("🔍 Cerca estrazioni", use_container_width=True):
+            found = 0
+            prog = st.progress(0)
+            start_date = date.today() - timedelta(days=fetch_days)
+            draw_dates = []
+            d = start_date
+            while d <= date.today():
+                draw_dates.append(d)
+                d += timedelta(days=1)
+
+            existing_dates = set(str(df["date"]).replace(" ", "")[:10]
+                                 for _ in [1])  # set of known dates
+            existing_dates = set(str(x)[:10] for x in df["date"])
+
+            current_df = df.copy()
+            for idx, dd in enumerate(draw_dates):
+                prog.progress((idx + 1) / len(draw_dates))
+                dd_str = str(dd)
+                if dd_str in existing_dates:
+                    continue
+                nums = fetch_draw_for_date(dd_str)
+                if nums and len(set(nums)) == 6:
+                    next_n = int(current_df.iloc[-1]["draw"]) + 1
+                    current_df = add_draw_to_csv(current_df, next_n, dd_str, sorted(nums))
+                    found += 1
+
+            prog.empty()
+            if found:
+                st.success(f"✅ Trovate {found} nuove estrazioni!")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.info("Nessuna nuova estrazione trovata (o date già presenti).")
+
+        st.markdown("---")
+        st.caption("💡 Se l'auto-fetch fallisce, inserisci i numeri manualmente sopra.")
+
+    return df
+
+
 # ── HEADER ────────────────────────────────────────────────────────────────────
 def render_header(df):
     last    = df.iloc[-1]
@@ -490,6 +626,50 @@ def tab_predici(df, pool_info, ml_nums, ml_probs, candidates):
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+    # ─ Verifica risultato
+    st.markdown("---")
+    with st.expander(f"🎯 Verifica risultato draw #{nx} — inserisci i numeri usciti"):
+        st.caption("Inserisci i 6 numeri usciti per vedere quanti ne ha presi ogni sestina.")
+        vc = st.columns(6)
+        defaults = [1, 2, 3, 4, 5, 6]
+        actual_in = [vc[i].number_input(f"N{i+1}", 1, 49, value=defaults[i], key=f"ver{i}") for i in range(6)]
+        actual_set = set(actual_in)
+
+        if len(actual_set) == 6:
+            st.markdown("#### Risultato per ogni sestina:")
+            for rank, c in enumerate(candidates, 1):
+                nums_s = sorted(c["nums"])
+                hits  = [n for n in nums_s if n in actual_set]
+                misses= [n for n in nums_s if n not in actual_set]
+                medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][rank-1]
+
+                balls = ""
+                for n in nums_s:
+                    cls = "sofi1" if n in actual_set else "out"
+                    balls += ball_html(n, cls)
+
+                hit_color = "#0d3b1e" if len(hits) >= 3 else "#2a2a0d" if len(hits) >= 2 else "#3b0d0d"
+                hit_border= "#2ecc71" if len(hits) >= 3 else "#f0a500" if len(hits) >= 2 else "#e74c3c"
+                st.markdown(f"""
+                <div style="background:{hit_color};border:1px solid {hit_border};border-radius:10px;
+                            padding:.8rem 1.5rem;margin:.4rem 0;">
+                  <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+                    <span style="font-size:1.3rem">{medal}</span>
+                    {balls}
+                    <span style="margin-left:auto;font-size:1.1rem;font-weight:700;color:{hit_border}">
+                      {len(hits)}/6 indovinati
+                    </span>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # also show actual draw balls
+            st.markdown("**Numeri usciti:**")
+            actual_balls = "".join(ball_html(n, "std") for n in sorted(actual_set))
+            st.markdown(actual_balls, unsafe_allow_html=True)
+        else:
+            st.warning("Inserisci 6 numeri distinti.")
 
     # ─ Strategy explanation
     st.markdown("---")
@@ -780,6 +960,7 @@ def tab_dati(df):
 def main():
     df = load_draws()
 
+    render_sidebar(df)
     render_header(df)
 
     # Build pool for LAST draw → used by tabs 1
