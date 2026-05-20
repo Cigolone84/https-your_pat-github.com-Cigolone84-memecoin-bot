@@ -1037,6 +1037,404 @@ def tab_analisi(df):
     st.dataframe(law_df, use_container_width=True, hide_index=True)
 
 
+# ── TAB 5: LABORATORIO ───────────────────────────────────────────────────────
+def tab_laboratorio(df):
+    st.subheader("🧪 Laboratorio Pattern — Analisi N-1 → N (zero data leakage)")
+    st.caption(
+        "Il laboratorio usa SOLO dati fino alla penultima draw (N-1). "
+        "La draw N è mostrata solo alla fine per verifica. Nessun aggiornamento al database."
+    )
+
+    if len(df) < 30:
+        st.warning("Servono almeno 30 draw nel database.")
+        return
+
+    N_idx  = len(df) - 1   # ultima draw = risultato reale da confrontare
+    N1_idx = len(df) - 2   # penultima = base del laboratorio
+
+    draw_N  = get_nums(df.iloc[N_idx])
+    draw_N1 = get_nums(df.iloc[N1_idx])
+    info_N  = df.iloc[N_idx]
+    info_N1 = df.iloc[N1_idx]
+
+    # Header: mostra le due draw
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(f"**🔵 Draw N-1** (base) &nbsp; #{int(info_N1['draw'])} · {str(info_N1['date'])[:10]}")
+        st.markdown("".join(ball_html(n, "sofi1") for n in draw_N1), unsafe_allow_html=True)
+    with col_b:
+        st.markdown(f"**🔴 Draw N** (risultato reale) &nbsp; #{int(info_N['draw'])} · {str(info_N['date'])[:10]}")
+        st.markdown("".join(ball_html(n, "ripe") for n in draw_N), unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Finestra storica: 100 draw FINO a N-1 inclusa
+    hist_start = max(0, N1_idx - 100)
+    hist = df.iloc[hist_start : N1_idx + 1].reset_index(drop=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANALISI 1 — Effetto giorno del mese
+    # ══════════════════════════════════════════════════════════════════════════
+    with st.expander("📅 Analisi 1 — Effetto Giorno del Mese", expanded=True):
+        scores_1 = {n: 0.0 for n in range(1, 50)}
+        try:
+            day_N = pd.to_datetime(info_N["date"]).day
+        except Exception:
+            day_N = None
+
+        if day_N:
+            near_range = 2
+            near_N = set(range(max(1, day_N - near_range), min(50, day_N + near_range + 1)))
+
+            day_rows = []
+            for _, row in hist.iterrows():
+                try:
+                    dom = pd.to_datetime(row["date"]).day
+                except Exception:
+                    continue
+                nums = set(get_nums(row))
+                near = set(range(max(1, dom - near_range), min(50, dom + near_range + 1)))
+                exp  = len(near) * 6 / 49
+                hits = len(nums & near)
+                day_rows.append({"day": dom, "hits": hits, "expected": exp,
+                                  "excess": hits - exp})
+
+            da_df = pd.DataFrame(day_rows)
+            if not da_df.empty:
+                avg_h  = da_df["hits"].mean()
+                avg_ex = da_df["expected"].mean()
+                pct_ok = (da_df["hits"] >= da_df["expected"]).mean() * 100
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Hit medi vicino giorno", f"{avg_h:.2f}")
+                m2.metric("Atteso (casuale)", f"{avg_ex:.2f}")
+                m3.metric("% draw con ≥ atteso", f"{pct_ok:.0f}%")
+
+                st.markdown(f"**Giorno draw N = {day_N}** → numeri vicini: `{sorted(near_N)}`")
+
+                # Score: proximity to day_N
+                for n in range(1, 50):
+                    dist = abs(n - day_N)
+                    if dist <= near_range:
+                        scores_1[n] = float(near_range + 1 - dist)
+
+                # Chart: excess by day-of-month
+                exc = da_df.groupby("day")["excess"].mean().reset_index()
+                fig1 = go.Figure(go.Bar(
+                    x=exc["day"], y=exc["excess"],
+                    marker_color=["#2ecc71" if v >= 0 else "#e74c3c" for v in exc["excess"]],
+                ))
+                fig1.add_hline(y=0, line_dash="dash", line_color="#f0a500")
+                fig1.update_layout(
+                    title="Eccesso hit vicino al giorno (storico)",
+                    xaxis_title="Giorno del mese", yaxis_title="Hit − Atteso",
+                    plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+                    font=dict(color="#e6edf3"), showlegend=False,
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+        else:
+            st.warning("Date non disponibili per questa analisi.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANALISI 2 — Differenze posizionali tra sestine consecutive
+    # ══════════════════════════════════════════════════════════════════════════
+    with st.expander("📐 Analisi 2 — Differenze Posizionali Consecutive", expanded=True):
+        delta_rows = []
+        for i in range(len(hist) - 1):
+            prev_n = get_nums(hist.iloc[i])
+            curr_n = get_nums(hist.iloc[i + 1])
+            row = {}
+            for k in range(6):
+                row[f"D{k+1}"] = curr_n[k] - prev_n[k]
+            delta_rows.append(row)
+
+        delta_df = pd.DataFrame(delta_rows)
+        scores_2 = {n: 0.0 for n in range(1, 50)}
+
+        if not delta_df.empty:
+            pos_table = []
+            for k in range(6):
+                col = f"D{k+1}"
+                mean_d = delta_df[col].mean()
+                std_d  = delta_df[col].std()
+                pct_p  = (delta_df[col] > 0).mean()
+                pct_e  = (delta_df[col] % 2 == 0).mean()
+                pred_v = max(1, min(49, int(round(draw_N1[k] + mean_d))))
+                pos_table.append({
+                    "Pos": f"N{k+1}", "N-1": draw_N1[k],
+                    "Media Δ": round(mean_d, 2), "Std Δ": round(std_d, 2),
+                    "% ↑": f"{pct_p*100:.0f}%", "% pari": f"{pct_e*100:.0f}%",
+                    "Predetto": pred_v,
+                })
+                # Score window around prediction
+                pred_f = draw_N1[k] + mean_d
+                for n in range(1, 50):
+                    dist = abs(n - pred_f)
+                    if dist <= max(1, std_d):
+                        scores_2[n] += max(0.0, 1.0 - dist / (std_d + 1))
+
+            st.dataframe(pd.DataFrame(pos_table), use_container_width=True, hide_index=True)
+
+            # Boxplot
+            fig2 = go.Figure()
+            colors = ["#e74c3c", "#3498db", "#2ecc71", "#f0a500", "#9b59b6", "#1abc9c"]
+            for k in range(6):
+                fig2.add_trace(go.Box(
+                    y=delta_df[f"D{k+1}"], name=f"N{k+1}",
+                    marker_color=colors[k], boxmean=True,
+                ))
+            fig2.update_layout(
+                title="Distribuzione Δ per posizione (100 draw)",
+                yaxis_title="Δ vs draw precedente",
+                plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+                font=dict(color="#e6edf3"),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.warning("Dati insufficienti.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANALISI 3 — Pattern parità e differenza inter-sestina
+    # ══════════════════════════════════════════════════════════════════════════
+    with st.expander("🔢 Analisi 3 — Pattern Parità e Finestre ±5 / ±10", expanded=True):
+        par_rows = []
+        for i in range(len(hist) - 1):
+            prev_n = get_nums(hist.iloc[i])
+            curr_n = get_nums(hist.iloc[i + 1])
+            for k in range(6):
+                d = curr_n[k] - prev_n[k]
+                par_rows.append({
+                    "pos": k + 1, "delta": d,
+                    "even": d % 2 == 0,
+                    "w5":   abs(d) <= 5,
+                    "w10":  abs(d) <= 10,
+                    "up":   d > 0,
+                })
+
+        par_df = pd.DataFrame(par_rows)
+        scores_3 = {n: 0.0 for n in range(1, 50)}
+
+        if not par_df.empty:
+            par_table = []
+            for k in range(6):
+                sub = par_df[par_df["pos"] == k + 1]
+                pct_e   = sub["even"].mean()
+                pct_w5  = sub["w5"].mean()
+                pct_w10 = sub["w10"].mean()
+                pct_up  = sub["up"].mean()
+                mean_d  = sub["delta"].mean()
+                par_table.append({
+                    "Pos": f"N{k+1}", "N-1": draw_N1[k],
+                    "% Δ pari": f"{pct_e*100:.0f}%",
+                    "% |Δ|≤5":  f"{pct_w5*100:.0f}%",
+                    "% |Δ|≤10": f"{pct_w10*100:.0f}%",
+                    "% crescente": f"{pct_up*100:.0f}%",
+                    "Media Δ": round(mean_d, 2),
+                })
+                base = draw_N1[k]
+                for n in range(1, 50):
+                    d = abs(n - base)
+                    if d <= 5:
+                        scores_3[n] += pct_w5 * 2.0
+                    elif d <= 10:
+                        scores_3[n] += pct_w10 * 1.0
+
+            st.dataframe(pd.DataFrame(par_table), use_container_width=True, hide_index=True)
+
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("% Δ pari", f"{par_df['even'].mean()*100:.0f}%")
+            g2.metric("% |Δ|≤5",  f"{par_df['w5'].mean()*100:.0f}%")
+            g3.metric("% |Δ|≤10", f"{par_df['w10'].mean()*100:.0f}%")
+            g4.metric("% crescente", f"{par_df['up'].mean()*100:.0f}%")
+
+            # Sign heatmap (last 50 pairs)
+            sign_mat = []
+            for i in range(len(hist) - 1):
+                pn = get_nums(hist.iloc[i])
+                cn = get_nums(hist.iloc[i + 1])
+                sign_mat.append([1 if cn[k] > pn[k] else (-1 if cn[k] < pn[k] else 0) for k in range(6)])
+            sign_arr = np.array(sign_mat[-50:])
+            fig3 = go.Figure(go.Heatmap(
+                z=sign_arr,
+                colorscale=[[0, "#e74c3c"], [0.5, "#2c3e50"], [1, "#2ecc71"]],
+                zmid=0, xgaps=1, ygaps=1,
+                x=[f"N{k+1}" for k in range(6)],
+                hovertemplate="Draw %{y} · N%{x}: %{z}<extra></extra>",
+            ))
+            fig3.update_layout(
+                title="Segno Δ per posizione — ultime 50 draw (🟢=+, 🔴=−)",
+                plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+                font=dict(color="#e6edf3"),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.warning("Dati insufficienti.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # OUTPUT FINALE — verifica su N e previsione N+1
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("🎯 Output Finale del Laboratorio")
+
+    def _lab_build_sestina(base_nums, sc1, sc2, sc3, df_ref, idx_ref):
+        """Combine 3 scores and pick best law-passing sestina from top-15."""
+        total = {}
+        for n in range(1, 50):
+            total[n] = sc1.get(n, 0) * 1.0 + sc2.get(n, 0) * 2.0 + sc3.get(n, 0) * 2.0
+        ranked = sorted(total.items(), key=lambda x: -x[1])
+        pool15 = [n for n, _ in ranked[:15]]
+
+        best, best_sc = None, -9999
+        tried = 0
+        for combo in combinations(pool15, 6):
+            tried += 1
+            if tried > 3000:
+                break
+            nums = list(combo)
+            lp, lt = laws_pass_count(nums, df_ref, idx_ref)
+            if lp < 9:
+                continue
+            sc = sum(total.get(n, 0) for n in nums) + lp * 0.5
+            if sc > best_sc:
+                best_sc, best = sc, sorted(nums)
+
+        if best is None:
+            best = sorted([n for n, _ in ranked[:6]])
+        return best, total, ranked
+
+    # ── Previsione per draw N (verifica)
+    sestina_N, total_N, ranked_N = _lab_build_sestina(
+        draw_N1, scores_1, scores_2, scores_3,
+        df.iloc[: N1_idx + 1], N1_idx,
+    )
+    hits_N = sorted(set(sestina_N) & set(draw_N))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Previsione laboratorio per draw #{int(info_N['draw'])}** (usando solo dati ≤ N-1)")
+        balls_pred = ""
+        for n in sestina_N:
+            cls = "sofi1" if n in set(draw_N) else "out"
+            balls_pred += ball_html(n, cls)
+        st.markdown(balls_pred, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"**Risultato reale draw #{int(info_N['draw'])}**")
+        balls_real = ""
+        for n in draw_N:
+            cls = "ripe" if n in set(sestina_N) else "sofi2"
+            balls_real += ball_html(n, cls)
+        st.markdown(balls_real, unsafe_allow_html=True)
+
+    h = len(hits_N)
+    color = "#2ecc71" if h >= 3 else "#f0a500" if h >= 2 else "#e74c3c"
+    st.markdown(f"""
+    <div style="background:#161b22;border:2px solid {color};border-radius:10px;
+                padding:1rem 2rem;text-align:center;margin:1rem 0;">
+      <div style="font-size:2rem;color:{color};font-weight:800">{h}/6 indovinati</div>
+      <div style="color:#8b949e">
+        {"Numeri comuni: " + " ".join(f"{n:02d}" for n in hits_N) if hits_N else "Nessun numero comune"}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Previsione N+1
+    st.markdown("---")
+    nx_draw_num = int(info_N["draw"]) + 1
+    st.subheader(f"🔮 Previsione Draw #{nx_draw_num} (in arrivo)")
+
+    # Rebuild scores using draw_N as base
+    sc1_next = {n: 0.0 for n in range(1, 50)}
+    sc2_next = {n: 0.0 for n in range(1, 50)}
+    sc3_next = {n: 0.0 for n in range(1, 50)}
+
+    # Score 1: day of next expected draw
+    try:
+        date_N_dt = pd.to_datetime(info_N["date"]).date()
+        nxt_date = date_N_dt + timedelta(days=1)
+        while nxt_date.weekday() not in _DRAW_WEEKDAYS:
+            nxt_date += timedelta(days=1)
+        day_next = nxt_date.day
+        for n in range(1, 50):
+            dist = abs(n - day_next)
+            if dist <= 2:
+                sc1_next[n] = float(3 - dist)
+    except Exception:
+        pass
+
+    # Score 2: apply mean deltas to draw_N
+    if not delta_df.empty:
+        for k in range(6):
+            mean_d = delta_df[f"D{k+1}"].mean()
+            std_d  = delta_df[f"D{k+1}"].std()
+            pred_f = draw_N[k] + mean_d
+            for n in range(1, 50):
+                dist = abs(n - pred_f)
+                if dist <= max(1, std_d):
+                    sc2_next[n] += max(0.0, 1.0 - dist / (std_d + 1))
+
+    # Score 3: ±5/±10 windows around draw_N
+    if not par_df.empty:
+        for k in range(6):
+            sub = par_df[par_df["pos"] == k + 1]
+            pct_w5  = sub["w5"].mean()
+            pct_w10 = sub["w10"].mean()
+            base = draw_N[k]
+            for n in range(1, 50):
+                d = abs(n - base)
+                if d <= 5:
+                    sc3_next[n] += pct_w5 * 2.0
+                elif d <= 10:
+                    sc3_next[n] += pct_w10 * 1.0
+
+    sestina_next, total_next, ranked_next = _lab_build_sestina(
+        draw_N, sc1_next, sc2_next, sc3_next, df, len(df) - 1,
+    )
+
+    pool_N = build_pool(df, draw_idx=-1)
+    lp_next, _ = laws_pass_count(sestina_next, df, len(df) - 1)
+
+    st.markdown(f"**Sestina laboratorio draw #{nx_draw_num}:**")
+    balls_next_html = ""
+    for n in sestina_next:
+        if n in pool_N["ripetuti"]:   cls = "ripe"
+        elif n in pool_N["soffi_1"]:  cls = "sofi1"
+        elif n in pool_N["soffi_24"]: cls = "sofi2"
+        else:                         cls = "ml"
+        balls_next_html += ball_html(n, cls)
+    st.markdown(balls_next_html, unsafe_allow_html=True)
+
+    st.markdown(
+        f"Leggi ✓: **{lp_next}/13** &nbsp;|&nbsp; "
+        f"Score: **{sum(total_next.get(n,0) for n in sestina_next):.2f}**"
+    )
+
+    st.markdown("**Top-15 candidati (laboratorio):**")
+    cands_html = ""
+    for n, _ in ranked_next[:15]:
+        if n in pool_N["ripetuti"]:   cls = "ripe"
+        elif n in pool_N["soffi_1"]:  cls = "sofi1"
+        elif n in pool_N["soffi_24"]: cls = "sofi2"
+        else:                         cls = "ml"
+        cands_html += ball_html(n, cls)
+    st.markdown(cands_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+    with st.expander("ℹ️ Logica di scoring combinato"):
+        st.markdown(f"""
+**Punteggio composito** per ogni numero 1-49:
+
+| Analisi | Peso | Descrizione |
+|---------|------|-------------|
+| 📅 Giorno del mese | 1× | Prossimità al giorno del mese della prossima draw |
+| 📐 Delta posizionale | 2× | Finestra attorno al valore N-1 + media storica dei delta |
+| 🔢 Parità ±5/±10 | 2× | Probabilità storica che il numero rimanga entro ±5 o ±10 |
+
+Filtro: reject sestine con < 9/13 leggi superate.
+Top-15 candidati → enumerate combinazioni → seleziona score max.
+        """)
+
+
 # ── TAB 4: DATI ───────────────────────────────────────────────────────────────
 def tab_dati(df):
     st.subheader("🗄️ Dati & Storia")
@@ -1095,11 +1493,12 @@ def main():
         candidates = generate_candidates(pool_info, ml_nums, df, n_sample=4000)
 
     # Tabs
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "🎯 PREDICI",
         "🔬 BACKTEST 100 draw",
         "📊 ANALISI",
         "🗄️ DATI & STORIA",
+        "🧪 LABORATORIO",
     ])
 
     with t1:
@@ -1110,6 +1509,8 @@ def main():
         tab_analisi(df)
     with t4:
         tab_dati(df)
+    with t5:
+        tab_laboratorio(df)
 
 
 main()
