@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from itertools import combinations
-import warnings
+import re, os, warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
@@ -48,33 +48,90 @@ POS_WINDOW    = 100
 SUM_MIN, SUM_MAX = 75, 215
 RANGE_MIN     = 25
 MIN_DECADES   = 3
-FEATURE_NAMES = ["Ripetuto", "Soffio±1", "Coperto±2-4",
-                 "Decade Bias", "Freq50", "Ritardo", "Pos Boost"]
+FEATURE_NAMES = ["Cat Precision", "Decade Corr",
+                 "Freq Rel", "Ritardo Rel", "Pos Boost",
+                 "Is Ripetuto", "Is Soffio±1"]
 
 # ── DATA ─────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Caricamento dati…")
-def load_draws():
+def _is_lotto_col(series) -> bool:
+    """True if the series looks like lotto ball numbers: integers in 1-49, ≥80% non-null."""
     try:
-        df = pd.read_csv("lotto_draws.csv")
-    except FileNotFoundError:
-        st.error("⚠️ lotto_draws.csv non trovato.")
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if len(s) < len(series) * 0.8:
+            return False
+        return int(s.min()) >= 1 and int(s.max()) <= 49 and float((s - s.round()).abs().max()) < 0.01
+    except Exception:
+        return False
+
+
+@st.cache_data(show_spinner="Caricamento dati…", ttl=60)
+def load_draws():
+    # Try common file names and both comma and semicolon separators
+    filenames  = ["lotto_draws.csv", "kumulacja.csv", "draws.csv", "lotto.csv"]
+    separators = [",", ";", "\t"]
+    df, used_file = None, None
+    for fname in filenames:
+        if not os.path.exists(fname):
+            continue
+        for sep in separators:
+            try:
+                _df = pd.read_csv(fname, sep=sep)
+                if len(_df.columns) >= 6:
+                    df, used_file = _df, fname
+                    break
+            except Exception:
+                continue
+        if df is not None:
+            break
+
+    if df is None:
+        st.error(f"⚠️ CSV non trovato. Cercato: {', '.join(filenames)}")
         st.stop()
-    df.columns = [c.lower().strip() for c in df.columns]
-    num_cols = [c for c in df.columns if c.startswith("n") and c[1:].isdigit()]
-    if not num_cols:
-        num_cols = [c for c in df.columns if "num" in c or "ball" in c]
+
+    df.columns = [str(c).lower().strip() for c in df.columns]
+
+    # Strategy 1: explicit n1..n6 or n_1..n_6
+    num_cols = [c for c in df.columns if re.match(r'^n_?\d+$', c)]
+
+    # Strategy 2: b1..b6, ball1..ball6, ball_1..ball_6
     if len(num_cols) < 6:
-        candidates = [c for c in df.columns
-                      if df[c].dtype in [np.int64, np.float64]]
+        num_cols = [c for c in df.columns if re.match(r'^(b|ball|ball_?)\d+$', c)]
+
+    # Strategy 3 ← KEY FIX: any column whose values are integers in 1-49
+    if len(num_cols) < 6:
+        num_cols = [c for c in df.columns if _is_lotto_col(df[c])]
+
+    # Strategy 4: last 6 numeric columns (risky fallback — may grab draw# or dates)
+    if len(num_cols) < 6:
+        candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         num_cols = candidates[-6:]
+
+    if len(num_cols) < 6:
+        st.error(
+            f"⚠️ Trovate solo {len(num_cols)} colonne numeriche valide (1-49). "
+            f"Colonne nel CSV: {list(df.columns)}"
+        )
+        st.stop()
+
+    num_cols = list(num_cols[:6])
     df = df.rename(columns={num_cols[i]: f"n{i+1}" for i in range(6)})
     for c in [f"n{i}" for i in range(1, 7)]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=[f"n{i}" for i in range(1, 7)]).reset_index(drop=True)
+
+    # Validate: all numbers must be 1-49
+    for c in [f"n{i}" for i in range(1, 7)]:
+        df = df[(df[c] >= 1) & (df[c] <= 49)]
+    df = df.reset_index(drop=True)
+
     if "draw" not in df.columns:
         df["draw"] = range(1, len(df) + 1)
     if "date" not in df.columns:
         df["date"] = ""
+
+    # Store debug info for display
+    df.attrs["_source_file"]  = used_file
+    df.attrs["_source_cols"]  = num_cols
     return df
 
 
@@ -248,57 +305,73 @@ def compute_positional_analysis(df_hash, _df):
 
 
 # ── STRATO 4: META-LEARNER ────────────────────────────────────────────────────
-def _make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost):
-    return [
-        1.0 if n in pool["ripetuti"] else 0.0,
-        1.0 if n in pool["soffi_1"]  else 0.0,
-        1.0 if n in pool["soffi_24"] else 0.0,
-        -float(num_bias.get(n, 0.0)),        # negate: underestimated → positive
-        freq.get(n, 0) / 50.0,
-        min(ritardo.get(n, 200), 200) / 200.0,
-        min(pos_boost.get(n, 0.0), 3.0) / 3.0,
-    ]
+_EXP_INTERVAL = 49.0 / 6.0   # ≈ 8.17 draws between appearances
+_EXP_FREQ50   = 50 * 6 / 49  # ≈ 6.12 appearances in last 50 draws
 
 
-def _pool_and_features(df, idx, num_bias, pos_boost):
+def _make_feature_row(n, pool, freq, last_seen, ref_idx, prec_weights, num_bias, pos_boost):
+    """7 features for number n that IS in the pool.
+    Uses continuous precision (Strato 1 result) instead of binary category flags.
+    """
+    if   n in pool["ripetuti"]:  cat = "Ripetuto"
+    elif n in pool["soffi_1"]:   cat = "Soffio±1"
+    else:                        cat = "Coperto±2-4"
+
+    cat_p    = float(prec_weights.get(cat, 0.10))    # Strato 1 precision (continuous)
+    dec_corr = -float(num_bias.get(n, 0.0))           # negate: underestimated → +
+    f_freq   = freq.get(n, 0) / _EXP_FREQ50          # relative to expected frequency
+
+    rit = ref_idx - last_seen[n] - 1 if n in last_seen else 200
+    f_rit  = min(rit, 100) / _EXP_INTERVAL            # relative to expected interval
+
+    f_pos  = min(pos_boost.get(n, 0.0), 3.0) / 3.0
+    f_ripe = 1.0 if n in pool["ripetuti"] else 0.0
+    f_sofi = 1.0 if n in pool["soffi_1"]  else 0.0
+
+    return [cat_p, dec_corr, f_freq, f_rit, f_pos, f_ripe, f_sofi]
+
+
+def _pool_features(df, idx, prec_weights, num_bias, pos_boost):
+    """Feature matrix for POOL MEMBERS ONLY at draw idx using data < idx.
+    Training pool-only (not all 49 numbers) fixes the class-imbalance problem
+    and forces the model to learn within-pool discrimination.
+    Returns (X, pool, pool_nums_list).
+    """
     pool = build_pool_at(df, idx - 1)
 
+    # Efficient freq: O(50*6) instead of O(49*200)
     freq = {}
     for j in range(max(0, idx - 50), idx):
         for n in get_nums(df.iloc[j]):
             freq[n] = freq.get(n, 0) + 1
 
-    ritardo = {}
-    for n in range(1, 50):
-        found = False
-        for j in range(idx - 1, max(-1, idx - 201), -1):
-            if n in set(get_nums(df.iloc[j])):
-                ritardo[n] = idx - j - 1
-                found = True
-                break
-        if not found:
-            ritardo[n] = 200
+    # Efficient last_seen: O(200*6)
+    last_seen = {}
+    for j in range(max(0, idx - 201), idx):
+        for n in get_nums(df.iloc[j]):
+            last_seen[n] = j
 
+    pool_nums = sorted(pool["pool_all"])
     X = np.array(
-        [_make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost)
-         for n in range(1, 50)],
+        [_make_feature_row(n, pool, freq, last_seen, idx, prec_weights, num_bias, pos_boost)
+         for n in pool_nums],
         dtype=np.float32,
     )
-    return X, pool
+    return X, pool, pool_nums
 
 
-@st.cache_data(show_spinner="Strato 4 — training Meta-Learner…")
-def train_meta_learner(df_hash, _df, num_bias, pos_boost):
+@st.cache_data(show_spinner="Strato 4 — training Meta-Learner (pool-only)…")
+def train_meta_learner(df_hash, _df, num_bias, pos_boost, prec_weights):
+    """Train LR on pool members only — ≈14% positive rate, much better than 12% all-49."""
     df    = _df
     total = len(df)
     start = max(WARMUP, total - PREC_WINDOW)
 
     X_parts, y_parts = [], []
     for i in range(start, total):
-        actual     = set(get_nums(df.iloc[i]))
-        X_i, _     = _pool_and_features(df, i, num_bias, pos_boost)
-        y_i        = np.array([1 if n in actual else 0 for n in range(1, 50)],
-                               dtype=np.int8)
+        actual       = set(get_nums(df.iloc[i]))
+        X_i, _, pnums = _pool_features(df, i, prec_weights, num_bias, pos_boost)
+        y_i          = np.array([1 if n in actual else 0 for n in pnums], dtype=np.int8)
         X_parts.append(X_i)
         y_parts.append(y_i)
 
@@ -307,78 +380,101 @@ def train_meta_learner(df_hash, _df, num_bias, pos_boost):
 
     scaler = StandardScaler()
     X_sc   = scaler.fit_transform(X_mat)
-    clf    = LogisticRegression(C=0.5, class_weight="balanced",
+    clf    = LogisticRegression(C=1.0, class_weight="balanced",
                                 max_iter=1000, random_state=42)
     clf.fit(X_sc, y_vec)
     return clf, scaler
 
 
-def predict_proba_for(df, idx, clf, scaler, num_bias, pos_boost):
-    """P(esce) per ogni numero 1-49 per draw df.iloc[idx], dati < idx."""
-    X, pool = _pool_and_features(df, idx, num_bias, pos_boost)
-    probs   = clf.predict_proba(scaler.transform(X))[:, 1]
-    return {n: float(probs[n - 1]) for n in range(1, 50)}, pool
+def predict_proba_for(df, idx, clf, scaler, prec_weights, num_bias, pos_boost):
+    """P(esce) for pool members at draw df.iloc[idx], trained data < idx."""
+    X, pool, pnums = _pool_features(df, idx, prec_weights, num_bias, pos_boost)
+    probs = clf.predict_proba(scaler.transform(X))[:, 1]
+    return {n: float(probs[i]) for i, n in enumerate(pnums)}, pool
 
 
-def predict_next_draw(df, clf, scaler, num_bias, pos_boost):
-    """P(esce) per la draw successiva (non ancora nel CSV)."""
-    prev    = len(df) - 1
-    pool    = build_pool_at(df, prev)
+def predict_next_draw(df, clf, scaler, prec_weights, num_bias, pos_boost):
+    """P(esce) for the draw AFTER the last one in df."""
+    prev = len(df) - 1
+    pool = build_pool_at(df, prev)
 
     freq = {}
     for j in range(max(0, prev - 49), prev + 1):
         for n in get_nums(df.iloc[j]):
             freq[n] = freq.get(n, 0) + 1
 
-    ritardo = {}
-    for n in range(1, 50):
-        found = False
-        for j in range(prev, max(-1, prev - 201), -1):
-            if n in set(get_nums(df.iloc[j])):
-                ritardo[n] = prev - j
-                found = True
-                break
-        if not found:
-            ritardo[n] = 200
+    last_seen = {}
+    for j in range(max(0, prev - 200), prev + 1):
+        for n in get_nums(df.iloc[j]):
+            last_seen[n] = j
 
-    X     = np.array(
-        [_make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost)
-         for n in range(1, 50)],
+    pool_nums = sorted(pool["pool_all"])
+    X = np.array(
+        [_make_feature_row(n, pool, freq, last_seen, prev + 1, prec_weights, num_bias, pos_boost)
+         for n in pool_nums],
         dtype=np.float32,
     )
-    probs = clf.predict_proba(scaler.transform(X))[:, 1]
-    return {n: float(probs[n - 1]) for n in range(1, 50)}, pool
+    probs      = clf.predict_proba(scaler.transform(X))[:, 1]
+    probs_pool = {n: float(probs[i]) for i, n in enumerate(pool_nums)}
+    full_probs = {n: probs_pool.get(n, 0.0) for n in range(1, 50)}
+    return full_probs, pool
 
 
 # ── STRATO 5: SESTINA FINALE ──────────────────────────────────────────────────
 def generate_sestine(pool, probs, n_sestine=3,
                      s_min=SUM_MIN, s_max=SUM_MAX,
-                     r_min=RANGE_MIN, d_min=MIN_DECADES):
-    """Re-rank pool numbers by calibrated probs, apply hard constraints."""
+                     r_min=RANGE_MIN, d_min=MIN_DECADES,
+                     min_cat_each=1):
+    """Re-rank pool numbers by calibrated probs, apply hard constraints.
+
+    min_cat_each=1 enforces ≥1 number from each pool category (ripe/sofi/cop).
+    This prevents the LR from filling the sestina with only high-precision
+    ripetuti and ignoring coperti that are statistically likely.
+    """
     pool_ranked = sorted(pool["pool_all"], key=lambda x: probs.get(x, 0), reverse=True)
     top_pool    = pool_ranked[:min(28, len(pool_ranked))]
+    ripe  = pool["ripetuti"]
+    sofi  = pool["soffi_1"]
+    cop   = pool["soffi_24"]
+
+    def _valid(s):
+        if s[5] - s[0] < r_min:
+            return False
+        if len(set(n // 10 for n in s)) < d_min:
+            return False
+        if not (s_min <= sum(s) <= s_max):
+            return False
+        if min_cat_each > 0:
+            if not any(n in ripe for n in s): return False
+            if not any(n in sofi for n in s): return False
+            if not any(n in cop  for n in s): return False
+        return True
 
     results = []
     for combo in combinations(top_pool, 6):
-        s   = sorted(combo)
-        rng = s[5] - s[0]
-        if rng < r_min:
-            continue
-        if len(set(n // 10 for n in s)) < d_min:
-            continue
-        tot = sum(s)
-        if not (s_min <= tot <= s_max):
-            continue
-        results.append((sum(probs.get(n, 0) for n in s), s))
+        s = sorted(combo)
+        if _valid(s):
+            results.append((sum(probs.get(n, 0) for n in s), s))
 
     results.sort(reverse=True)
 
-    # Fallback: relax constraints if nothing found
+    # Fallback 1: relax sum/decades, keep category constraint
     if not results:
         for combo in combinations(top_pool, 6):
             s = sorted(combo)
-            if s[5] - s[0] < 20:
-                continue
+            if s[5] - s[0] < r_min: continue
+            if min_cat_each > 0:
+                if not any(n in ripe for n in s): continue
+                if not any(n in sofi for n in s): continue
+                if not any(n in cop  for n in s): continue
+            results.append((sum(probs.get(n, 0) for n in s), s))
+        results.sort(reverse=True)
+
+    # Fallback 2: drop category constraint if pool is unbalanced
+    if not results:
+        for combo in combinations(top_pool, 6):
+            s = sorted(combo)
+            if s[5] - s[0] < 20: continue
             results.append((sum(probs.get(n, 0) for n in s), s))
         results.sort(reverse=True)
 
@@ -439,13 +535,28 @@ if len(df) < WARMUP + 20:
     st.stop()
 
 # Run all strati (cached after first run)
-prec_tables, rolling_data, dyn_weights = compute_precision(df_hash, df)
-bias, fn_c, fp_c, num_bias, n_draws    = compute_decade_bias(df_hash, df)
+prec_tables, rolling_data, dyn_weights   = compute_precision(df_hash, df)
+bias, fn_c, fp_c, num_bias, n_draws      = compute_decade_bias(df_hash, df)
 pos_means, pos_stds, pos_errors, pos_boost = compute_positional_analysis(df_hash, df)
-clf, scaler = train_meta_learner(df_hash, df, num_bias, pos_boost)
+# prec_weights (dyn_weights) fed into LR as continuous features — BUG 2 fix
+clf, scaler   = train_meta_learner(df_hash, df, num_bias, pos_boost, dyn_weights)
 
-next_probs, next_pool = predict_next_draw(df, clf, scaler, num_bias, pos_boost)
+next_probs, next_pool = predict_next_draw(df, clf, scaler, dyn_weights, num_bias, pos_boost)
 top_sestine           = generate_sestine(next_pool, next_probs)
+
+# ── DEBUG SIDEBAR ─────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 🔧 Debug CSV")
+    last_row  = df.iloc[-1]
+    last_nums = get_nums(last_row)
+    st.write(f"**File:** `{df.attrs.get('_source_file', 'N/A')}`")
+    st.write(f"**Colonne rilevate:** `{df.attrs.get('_source_cols', [])}`")
+    st.write(f"**Totale draw:** {len(df)}")
+    st.write(f"**Ultima draw:** #{int(last_row['draw'])} — {str(last_row['date'])[:10]}")
+    st.write(f"**Numeri:** {last_nums}")
+    st.write(f"**Pool size:** {len(next_pool['pool_all'])}")
+    if any(n < 1 or n > 49 for n in last_nums):
+        st.error("⚠️ Numeri fuori range 1-49 — controlla il mapping delle colonne!")
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -623,6 +734,15 @@ with tab3:
         f"Vincoli: range ≥ {RANGE_MIN}, ≥ {MIN_DECADES} decine, somma {SUM_MIN}-{SUM_MAX}."
     )
 
+    # ── Debug box — last draw used to build pool ──────────────────────────────
+    _last = df.iloc[-1]
+    _nums = get_nums(_last)
+    st.info(
+        f"🔍 **Ultima draw letta dal CSV:** "
+        f"#{int(_last['draw'])} ({str(_last['date'])[:10]}) — "
+        f"numeri: {' '.join(f'{n:02d}' for n in _nums)}"
+    )
+
     st.markdown("**Pool App 1:** " + pool_html(next_pool), unsafe_allow_html=True)
     st.caption(
         f"Ripetuti: {len(next_pool['ripetuti'])} | "
@@ -718,7 +838,7 @@ with tab4:
     sel_act  = set(get_nums(df.iloc[sel_idx]))
 
     hist_probs, hist_pool = predict_proba_for(
-        df, sel_idx, clf, scaler, num_bias, pos_boost
+        df, sel_idx, clf, scaler, dyn_weights, num_bias, pos_boost
     )
     hist_ml   = generate_sestine(hist_pool, hist_probs, n_sestine=3)
     app1_w    = {
