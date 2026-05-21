@@ -1,34 +1,29 @@
 """
-App 2 — Signal Correction Engine
-Walk-forward simulation su 7000+ draw storiche.
-Per ogni draw N usa solo dati fino a N-1, genera segnali, confronta con reale,
-accumula gli errori e calibra automaticamente i pesi con regressione logistica.
+App 2 — Meta-Learner Signal Correction Engine
+5 strati: precision storica → errori per decina → pattern posizionali
+          → regressione logistica → sestina finale dal pool di App 1.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score
 from itertools import combinations
-import os, pickle, warnings
+import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="App 2 — Signal Correction",
-    page_icon="⚗️", layout="wide",
+    page_title="Meta-Learner — Signal Correction",
+    page_icon="🧬", layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# ── THEME ─────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
+st.markdown("""<style>
   body,.stApp{background:#0a0e17;color:#e6edf3}
   .block-container{padding-top:1rem}
   .kpi{background:#161b22;border:1px solid #30363d;border-radius:10px;
-       padding:1rem 1.5rem;text-align:center}
+       padding:1rem 1.5rem;text-align:center;margin-bottom:.5rem}
   .kv{font-size:1.8rem;font-weight:700;color:#f0a500}
   .kl{font-size:.8rem;color:#8b949e;margin-top:4px}
   .ball{display:inline-block;width:34px;height:34px;border-radius:50%;
@@ -36,15 +31,25 @@ st.markdown("""
   .ripe{background:#e74c3c;color:#fff}
   .sofi1{background:#3498db;color:#fff}
   .sofi2{background:#e67e22;color:#fff}
-  .ml{background:#9b59b6;color:#fff}
+  .hit{background:#2ecc71;color:#000}
   .out{background:#2c3e50;color:#8b949e;border:1px solid #444}
-  .hit{background:#2ecc71;color:#fff}
   hr{border-color:#30363d}
+  div[data-testid="stTabs"] button{color:#8b949e!important}
+  div[data-testid="stTabs"] button[aria-selected="true"]{color:#f0a500!important;
+    border-bottom:2px solid #f0a500!important}
 </style>""", unsafe_allow_html=True)
 
-SIM_CACHE = "sim_cache.pkl"
-FEAT_CACHE = "feat_cache.pkl"
-WARMUP = 100
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+WARMUP        = 100
+PREC_WINDOW   = 300
+DECADE_WINDOW = 100
+POS_WINDOW    = 100
+# Sum range wider than L13 (70-160) because real draws often exceed 160
+SUM_MIN, SUM_MAX = 75, 215
+RANGE_MIN     = 25
+MIN_DECADES   = 3
+FEATURE_NAMES = ["Ripetuto", "Soffio±1", "Coperto±2-4",
+                 "Decade Bias", "Freq50", "Ritardo", "Pos Boost"]
 
 # ── DATA ─────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Caricamento dati…")
@@ -52,632 +57,749 @@ def load_draws():
     try:
         df = pd.read_csv("lotto_draws.csv")
     except FileNotFoundError:
-        st.error("⚠️ lotto_draws.csv non trovato. Avvia prima App 1.")
+        st.error("⚠️ lotto_draws.csv non trovato.")
         st.stop()
     df.columns = [c.lower().strip() for c in df.columns]
     num_cols = [c for c in df.columns if c.startswith("n") and c[1:].isdigit()]
+    if not num_cols:
+        num_cols = [c for c in df.columns if "num" in c or "ball" in c]
     if len(num_cols) < 6:
-        cands = [c for c in df.columns if df[c].dtype in [np.int64, np.float64]]
-        num_cols = cands[-6:]
+        candidates = [c for c in df.columns
+                      if df[c].dtype in [np.int64, np.float64]]
+        num_cols = candidates[-6:]
     df = df.rename(columns={num_cols[i]: f"n{i+1}" for i in range(6)})
-    for c in [f"n{i}" for i in range(1,7)]:
+    for c in [f"n{i}" for i in range(1, 7)]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=[f"n{i}" for i in range(1,7)]).reset_index(drop=True)
-    if "draw" not in df.columns: df["draw"] = range(1, len(df)+1)
-    if "date" not in df.columns: df["date"] = ""
+    df = df.dropna(subset=[f"n{i}" for i in range(1, 7)]).reset_index(drop=True)
+    if "draw" not in df.columns:
+        df["draw"] = range(1, len(df) + 1)
+    if "date" not in df.columns:
+        df["date"] = ""
     return df
 
+
 def get_nums(row):
-    return sorted([int(row[f"n{i}"]) for i in range(1,7)])
-
-def build_pool(prev6):
-    ripe = set(prev6)
-    s1, s24 = set(), set()
-    for n in prev6:
-        for d in (1,):
-            if 1<=n-d<=49: s1.add(n-d)
-            if 1<=n+d<=49: s1.add(n+d)
-        for d in (2,3,4):
-            if 1<=n-d<=49: s24.add(n-d)
-            if 1<=n+d<=49: s24.add(n+d)
-    s1  -= ripe
-    s24 -= ripe | s1
-    return ripe, s1, s24
-
-# ── WALK-FORWARD SIMULATION ───────────────────────────────────────────────────
-def run_simulation(df, start=WARMUP, progress_cb=None):
-    """
-    Walk-forward su tutte le draw dal draw `start` in poi.
-    Per ogni draw i usa solo dati fino a i-1.
-    Ritorna DataFrame con statistiche per-draw.
-    """
-    N = len(df)
-    rows = []
-
-    for i in range(start, N):
-        if progress_cb and i % 200 == 0:
-            progress_cb((i - start) / (N - start))
-
-        prev = get_nums(df.iloc[i-1])
-        curr = set(get_nums(df.iloc[i]))
-        ripe, s1, s24 = build_pool(prev)
-        pool = ripe | s1 | s24
-
-        # frequency in last 50 draws (before i)
-        freq = {}
-        for j in range(max(0, i-50), i):
-            for n in get_nums(df.iloc[j]):
-                freq[n] = freq.get(n,0) + 1
-
-        # day of month
-        try:
-            day = pd.to_datetime(df.iloc[i]["date"]).day
-            day_near = sum(1 for n in curr if abs(n-day) <= 2)
-        except Exception:
-            day, day_near = 25, 0
-
-        # hits per category
-        rh  = len(ripe  & curr)
-        s1h = len(s1    & curr)
-        s24h= len(s24   & curr)
-        ph  = len(pool  & curr)
-        out = 6 - ph
-
-        # positional delta (from N-2 if available)
-        delta_hit = 0
-        if i >= 2:
-            prev2 = get_nums(df.iloc[i-2])
-            for k in range(6):
-                mean_d = prev[k] - prev2[k]
-                pred_n = max(1, min(49, int(round(prev[k] + mean_d))))
-                if pred_n in curr:
-                    delta_hit += 1
-
-        rows.append({
-            "idx":       i,
-            "draw":      int(df.iloc[i]["draw"]),
-            "ripe_hit":  rh,  "sofi1_hit": s1h,  "sofi24_hit": s24h,
-            "pool_hit":  ph,  "outside":   out,
-            "day_near":  day_near,
-            "delta_hit": delta_hit,
-            "ripe_sz":   len(ripe),  "sofi1_sz": len(s1),  "sofi24_sz": len(s24),
-            "pool_sz":   len(pool),
-        })
-
-    if progress_cb:
-        progress_cb(1.0)
-    return pd.DataFrame(rows)
+    return sorted([int(row[f"n{i}"]) for i in range(1, 7)])
 
 
-# ── FEATURE MATRIX (per logistic regression) ─────────────────────────────────
-def build_features(df, start=WARMUP, max_draws=5000, progress_cb=None):
-    """
-    Per ogni draw i e ogni numero n in 1-49: calcola feature vector + label.
-    X shape: (draws × 49, n_features)
-    y shape: (draws × 49,)  —  1 se n appare nel draw reale
-    """
-    N = min(len(df), start + max_draws)
-    X_rows, y_rows, meta = [], [], []
-
-    for i in range(start, N):
-        if progress_cb and i % 300 == 0:
-            progress_cb((i - start) / (N - start))
-
-        prev = get_nums(df.iloc[i-1])
-        curr = set(get_nums(df.iloc[i]))
-        ripe, s1, s24 = build_pool(prev)
-
-        freq = {}
-        for j in range(max(0, i-50), i):
-            for n in get_nums(df.iloc[j]):
-                freq[n] = freq.get(n,0) + 1
-
-        try:
-            day = pd.to_datetime(df.iloc[i]["date"]).day
-        except Exception:
-            day = 25
-
-        # positional delta signal
-        if i >= 2:
-            prev2 = get_nums(df.iloc[i-2])
-            deltas = [prev[k]-prev2[k] for k in range(6)]
-            preds  = [max(1,min(49,prev[k]+deltas[k])) for k in range(6)]
-        else:
-            preds = prev[:]
-
-        for n in range(1, 50):
-            # 7 features
-            f_ripe  = 1.0 if n in ripe  else 0.0
-            f_sofi1 = 1.0 if n in s1    else 0.0
-            f_sofi24= 1.0 if n in s24   else 0.0
-            f_day   = max(0.0, 3.0 - abs(n-day)) / 3.0
-            f_freq  = freq.get(n,0) / 6.0
-            f_delta = max(0.0, 1.0 - min(abs(n-p) for p in preds) / 5.0)
-            f_outside= 0.0 if (n in ripe or n in s1 or n in s24) else 1.0
-
-            X_rows.append([f_ripe, f_sofi1, f_sofi24, f_day, f_freq, f_delta, f_outside])
-            y_rows.append(1 if n in curr else 0)
-            meta.append({"draw_idx": i, "num": n})
-
-    if progress_cb:
-        progress_cb(1.0)
-
-    return (np.array(X_rows, dtype=np.float32),
-            np.array(y_rows,  dtype=np.int8),
-            pd.DataFrame(meta))
-
-FEATURE_NAMES = ["Ripetuto", "Soffio±1", "Coperto±2-4", "Giorno", "Freq50", "DeltaPos", "FuoriPool"]
+def build_pool_at(df, prev_idx):
+    """Pool for draw prev_idx+1 using only draw at prev_idx."""
+    last = get_nums(df.iloc[prev_idx])
+    ripetuti = set(last)
+    soffi_1, soffi_24 = set(), set()
+    for n in last:
+        for sign in (-1, 1):
+            v = n + sign
+            if 1 <= v <= 49:
+                soffi_1.add(v)
+        for d in (2, 3, 4):
+            for sign in (-1, 1):
+                v = n + sign * d
+                if 1 <= v <= 49:
+                    soffi_24.add(v)
+    soffi_1  -= ripetuti
+    soffi_24 -= (ripetuti | soffi_1)
+    return {
+        "ripetuti": ripetuti,
+        "soffi_1":  soffi_1,
+        "soffi_24": soffi_24,
+        "pool_all": ripetuti | soffi_1 | soffi_24,
+    }
 
 
-# ── LOGISTIC REGRESSION ───────────────────────────────────────────────────────
-def train_corrector(X, y):
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(X)
-    clf = LogisticRegression(C=1.0, max_iter=500, class_weight="balanced")
-    clf.fit(Xs, y)
-    return clf, scaler
+# ── STRATO 1: PRECISION STORICA ───────────────────────────────────────────────
+@st.cache_data(show_spinner="Strato 1 — precision storica…")
+def compute_precision(df_hash, _df):
+    df    = _df
+    total = len(df)
+    start = max(WARMUP, total - PREC_WINDOW)
 
-def predict_proba_all(clf, scaler, df):
-    """Generate probability for each number in 1-49 for the next draw."""
-    prev = get_nums(df.iloc[-1])
-    ripe, s1, s24 = build_pool(prev)
+    records = []
+    for i in range(start, total):
+        actual = set(get_nums(df.iloc[i]))
+        pool   = build_pool_at(df, i - 1)
+        for cat, members in [("Ripetuto",     pool["ripetuti"]),
+                              ("Soffio±1",    pool["soffi_1"]),
+                              ("Coperto±2-4", pool["soffi_24"])]:
+            for n in members:
+                records.append({
+                    "draw_idx": i,
+                    "draw":     int(df.iloc[i]["draw"]),
+                    "category": cat,
+                    "hit":      int(n in actual),
+                })
+    rec_df = pd.DataFrame(records)
+
+    prec_tables = {}
+    for ws in [50, 100, 200, 300]:
+        wstart = max(start, total - ws)
+        sub    = rec_df[rec_df["draw_idx"] >= wstart]
+        pt     = sub.groupby("category").agg(
+            appearances=("hit", "count"),
+            hits=("hit", "sum"),
+        )
+        pt["precision"]    = pt["hits"] / pt["appearances"]
+        pt["hit_per_draw"] = pt["hits"] / ws
+        prec_tables[ws]    = pt
+
+    # Cumulative rolling precision for chart
+    rolling_data = {}
+    for cat in ["Ripetuto", "Soffio±1", "Coperto±2-4"]:
+        sub = rec_df[rec_df["category"] == cat].sort_values("draw_idx")
+        grp = sub.groupby("draw_idx").agg(
+            hits=("hit", "sum"), appearances=("hit", "count")
+        ).reset_index()
+        cum_h = grp["hits"].cumsum()
+        cum_a = grp["appearances"].cumsum()
+        rolling_data[cat] = {
+            "draw":         [int(df.iloc[idx]["draw"]) for idx in grp["draw_idx"]],
+            "rolling_prec": (cum_h / cum_a).tolist(),
+        }
+
+    # Dynamic weights from 100-draw window, normalized to sum=3
+    w100 = prec_tables.get(100, prec_tables[min(prec_tables)])
+    cats = ["Ripetuto", "Soffio±1", "Coperto±2-4"]
+    raw  = {c: float(w100.loc[c, "precision"]) if c in w100.index else 0.1
+            for c in cats}
+    total_w     = sum(raw.values()) or 1.0
+    dyn_weights = {c: v / total_w * 3.0 for c, v in raw.items()}
+
+    return prec_tables, rolling_data, dyn_weights
+
+
+# ── STRATO 2: ERRORI PER DECINA ───────────────────────────────────────────────
+DECADES = [
+    ("D1 (1-10)",  set(range(1,  11))),
+    ("D2 (11-20)", set(range(11, 21))),
+    ("D3 (21-30)", set(range(21, 31))),
+    ("D4 (31-40)", set(range(31, 41))),
+    ("D5 (41-49)", set(range(41, 50))),
+]
+
+
+@st.cache_data(show_spinner="Strato 2 — errori per decina…")
+def compute_decade_bias(df_hash, _df):
+    df      = _df
+    total   = len(df)
+    start   = max(WARMUP, total - DECADE_WINDOW)
+    n_draws = total - start
+
+    fp = {d[0]: 0 for d in DECADES}
+    fn = {d[0]: 0 for d in DECADES}
+
+    for i in range(start, total):
+        actual   = set(get_nums(df.iloc[i]))
+        pool_set = build_pool_at(df, i - 1)["pool_all"]
+        for dname, dset in DECADES:
+            fp[dname] += len((pool_set & dset) - actual)
+            fn[dname] += len((actual & dset) - pool_set)
+
+    # bias > 0 → overestimated → penalize; bias < 0 → underestimated → promote
+    bias = {d[0]: (fp[d[0]] - fn[d[0]]) / n_draws for d in DECADES}
+
+    num_bias = {}
+    for n in range(1, 50):
+        for dname, dset in DECADES:
+            if n in dset:
+                num_bias[n] = bias[dname]
+                break
+
+    return bias, fn, fp, num_bias, n_draws
+
+
+# ── STRATO 3: PATTERN POSIZIONALI ─────────────────────────────────────────────
+@st.cache_data(show_spinner="Strato 3 — pattern posizionali…")
+def compute_positional_analysis(df_hash, _df):
+    df    = _df
+    total = len(df)
+    start = max(WARMUP, total - POS_WINDOW)
+
+    pos_errors = [[] for _ in range(6)]
+    for i in range(start, total):
+        actual      = sorted(get_nums(df.iloc[i]))
+        pool_sorted = sorted(build_pool_at(df, i - 1)["pool_all"])
+        if not pool_sorted:
+            continue
+        for k in range(6):
+            ak      = actual[k]
+            closest = min(pool_sorted, key=lambda x: abs(x - ak))
+            pos_errors[k].append(ak - closest)
+
+    pos_means = [np.mean(e) if e else 0.0 for e in pos_errors]
+    pos_stds  = [np.std(e)  if e else 5.0 for e in pos_errors]
+
+    pos_boost = {}
+    for n in range(1, 50):
+        boost = 0.0
+        for k in range(6):
+            lo = max(1,  1 + k * 7 - 4)
+            hi = min(49, 1 + k * 7 + 12)
+            if lo <= n <= hi:
+                boost += 0.4
+            mu    = pos_means[k]
+            sigma = pos_stds[k] if pos_stds[k] > 0 else 5.0
+            if abs(mu) > 1.5:
+                correction = n - mu
+                if 1 <= correction <= 49 and abs(n - correction) <= sigma:
+                    boost += 0.3
+        pos_boost[n] = boost
+
+    return pos_means, pos_stds, pos_errors, pos_boost
+
+
+# ── STRATO 4: META-LEARNER ────────────────────────────────────────────────────
+def _make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost):
+    return [
+        1.0 if n in pool["ripetuti"] else 0.0,
+        1.0 if n in pool["soffi_1"]  else 0.0,
+        1.0 if n in pool["soffi_24"] else 0.0,
+        -float(num_bias.get(n, 0.0)),        # negate: underestimated → positive
+        freq.get(n, 0) / 50.0,
+        min(ritardo.get(n, 200), 200) / 200.0,
+        min(pos_boost.get(n, 0.0), 3.0) / 3.0,
+    ]
+
+
+def _pool_and_features(df, idx, num_bias, pos_boost):
+    pool = build_pool_at(df, idx - 1)
 
     freq = {}
-    for j in range(max(0, len(df)-50), len(df)):
+    for j in range(max(0, idx - 50), idx):
         for n in get_nums(df.iloc[j]):
-            freq[n] = freq.get(n,0) + 1
+            freq[n] = freq.get(n, 0) + 1
 
-    try:
-        day = pd.to_datetime(df.iloc[-1]["date"]).day
-    except Exception:
-        day = 25
-
-    if len(df) >= 2:
-        prev2 = get_nums(df.iloc[-2])
-        deltas = [prev[k]-prev2[k] for k in range(6)]
-        preds  = [max(1,min(49,prev[k]+deltas[k])) for k in range(6)]
-    else:
-        preds = prev[:]
-
-    feats = []
+    ritardo = {}
     for n in range(1, 50):
-        feats.append([
-            1.0 if n in ripe  else 0.0,
-            1.0 if n in s1    else 0.0,
-            1.0 if n in s24   else 0.0,
-            max(0.0, 3.0 - abs(n-day)) / 3.0,
-            freq.get(n,0) / 6.0,
-            max(0.0, 1.0 - min(abs(n-p) for p in preds) / 5.0),
-            0.0 if (n in ripe or n in s1 or n in s24) else 1.0,
-        ])
+        found = False
+        for j in range(idx - 1, max(-1, idx - 201), -1):
+            if n in set(get_nums(df.iloc[j])):
+                ritardo[n] = idx - j - 1
+                found = True
+                break
+        if not found:
+            ritardo[n] = 200
 
-    Xs = scaler.transform(np.array(feats, dtype=np.float32))
-    probs = clf.predict_proba(Xs)[:,1]
-    return {n+1: float(probs[n]) for n in range(49)}, ripe, s1, s24
-
-
-# ── LAWS ─────────────────────────────────────────────────────────────────────
-def laws_pass(nums):
-    n = sorted(nums)
-    pari = sum(1 for x in n if x%2==0)
-    gaps = [n[i+1]-n[i] for i in range(5)]
-    return sum([
-        len(set(x//10 for x in n)) >= 3,
-        1 <= pari <= 5,
-        n[5]-n[0] > 20,
-        n[0] <= 10 or n[1] <= 15,
-        4 <= sum(gaps)/5 <= 11,
-        n[0] <= 15,
-        n[5] >= 35,
-        any(g <= 3 for g in gaps),
-        2 <= pari <= 4,
-        18 <= sum(n)/6 <= 32,
-        70 <= sum(n) <= 160,
-    ])
-
-def best_sestina_from_probs(probs_dict):
-    ranked = sorted(probs_dict.items(), key=lambda x:-x[1])
-    pool20 = [n for n,_ in ranked[:20]]
-
-    best, best_sc = None, -1
-    for combo in combinations(pool20, 6):
-        nums = list(combo)
-        if laws_pass(nums) < 9: continue
-        sc = sum(probs_dict[n] for n in nums)
-        if sc > best_sc:
-            best_sc, best = sc, sorted(nums)
-
-    if best is None:
-        best = sorted([n for n,_ in ranked[:6]])
-    return best, ranked[:20]
+    X = np.array(
+        [_make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost)
+         for n in range(1, 50)],
+        dtype=np.float32,
+    )
+    return X, pool
 
 
-# ── BALL HTML ────────────────────────────────────────────────────────────────
-def ball(n, cls="out"):
-    return f'<span class="ball {cls}">{n:02d}</span>'
+@st.cache_data(show_spinner="Strato 4 — training Meta-Learner…")
+def train_meta_learner(df_hash, _df, num_bias, pos_boost):
+    df    = _df
+    total = len(df)
+    start = max(WARMUP, total - PREC_WINDOW)
+
+    X_parts, y_parts = [], []
+    for i in range(start, total):
+        actual     = set(get_nums(df.iloc[i]))
+        X_i, _     = _pool_and_features(df, i, num_bias, pos_boost)
+        y_i        = np.array([1 if n in actual else 0 for n in range(1, 50)],
+                               dtype=np.int8)
+        X_parts.append(X_i)
+        y_parts.append(y_i)
+
+    X_mat = np.vstack(X_parts)
+    y_vec = np.concatenate(y_parts)
+
+    scaler = StandardScaler()
+    X_sc   = scaler.fit_transform(X_mat)
+    clf    = LogisticRegression(C=0.5, class_weight="balanced",
+                                max_iter=1000, random_state=42)
+    clf.fit(X_sc, y_vec)
+    return clf, scaler
 
 
-# ── MAIN ─────────────────────────────────────────────────────────────────────
-def main():
-    df = load_draws()
-    last = df.iloc[-1]
-    last_nums = get_nums(last)
-    nx = int(last["draw"]) + 1
+def predict_proba_for(df, idx, clf, scaler, num_bias, pos_boost):
+    """P(esce) per ogni numero 1-49 per draw df.iloc[idx], dati < idx."""
+    X, pool = _pool_and_features(df, idx, num_bias, pos_boost)
+    probs   = clf.predict_proba(scaler.transform(X))[:, 1]
+    return {n: float(probs[n - 1]) for n in range(1, 50)}, pool
 
-    st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
-      <span style="font-size:2.5rem">⚗️</span>
-      <div>
-        <div style="font-size:1.8rem;font-weight:800">App 2 — Signal Correction Engine</div>
-        <div style="font-size:.85rem;color:#8b949e">
-          {len(df):,} draw · Ultima: #{int(last['draw'])} del {str(last['date'])[:10]} ·
-          {'  '.join(f'<b>{n:02d}</b>' for n in last_nums)} · Prossima: <b>#{nx}</b>
-        </div>
-      </div>
-    </div>
-    <hr>
-    """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🚀 Simulazione", "📈 Calibrazione", "⚗️ Segnale Corretto", "🔍 Debug per Draw"
-    ])
+def predict_next_draw(df, clf, scaler, num_bias, pos_boost):
+    """P(esce) per la draw successiva (non ancora nel CSV)."""
+    prev    = len(df) - 1
+    pool    = build_pool_at(df, prev)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1 — SIMULAZIONE
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab1:
-        st.subheader("🚀 Walk-Forward Simulation su 7000+ Draw")
-        st.caption(
-            "Per ogni draw N usa SOLO dati fino a N-1. "
-            "Misura quanti numeri di ogni categoria si sono realmente avverati."
-        )
+    freq = {}
+    for j in range(max(0, prev - 49), prev + 1):
+        for n in get_nums(df.iloc[j]):
+            freq[n] = freq.get(n, 0) + 1
 
-        col_run, col_status = st.columns([2,3])
-        with col_run:
-            force = st.checkbox("Forza ricalcolo (ignora cache)")
-            run_btn = st.button("▶ Avvia simulazione", use_container_width=True, type="primary")
+    ritardo = {}
+    for n in range(1, 50):
+        found = False
+        for j in range(prev, max(-1, prev - 201), -1):
+            if n in set(get_nums(df.iloc[j])):
+                ritardo[n] = prev - j
+                found = True
+                break
+        if not found:
+            ritardo[n] = 200
 
-        sim = None
-        if os.path.exists(SIM_CACHE) and not force:
-            with open(SIM_CACHE,"rb") as f:
-                sim = pickle.load(f)
-            col_status.success(f"✅ Cache caricata: {len(sim):,} draw simulate.")
+    X     = np.array(
+        [_make_feature_row(n, pool, freq, ritardo, num_bias, pos_boost)
+         for n in range(1, 50)],
+        dtype=np.float32,
+    )
+    probs = clf.predict_proba(scaler.transform(X))[:, 1]
+    return {n: float(probs[n - 1]) for n in range(1, 50)}, pool
 
-        if run_btn:
-            prog = st.progress(0.0, text="Simulazione in corso…")
-            sim = run_simulation(df, start=WARMUP,
-                                 progress_cb=lambda v: prog.progress(v, text=f"{v*100:.0f}%"))
-            prog.empty()
-            with open(SIM_CACHE,"wb") as f:
-                pickle.dump(sim, f)
-            st.success(f"✅ Simulazione completata: {len(sim):,} draw analizzate!")
 
-        if sim is None:
-            st.info("Premi **▶ Avvia simulazione** per generare i dati.")
-            return
+# ── STRATO 5: SESTINA FINALE ──────────────────────────────────────────────────
+def generate_sestine(pool, probs, n_sestine=3,
+                     s_min=SUM_MIN, s_max=SUM_MAX,
+                     r_min=RANGE_MIN, d_min=MIN_DECADES):
+    """Re-rank pool numbers by calibrated probs, apply hard constraints."""
+    pool_ranked = sorted(pool["pool_all"], key=lambda x: probs.get(x, 0), reverse=True)
+    top_pool    = pool_ranked[:min(28, len(pool_ranked))]
 
-        # KPIs
-        k1,k2,k3,k4,k5 = st.columns(5)
-        for col,(lab,val,ico) in zip([k1,k2,k3,k4,k5],[
-            ("Hit medi ripetuti",    sim["ripe_hit"].mean(),   "🔴"),
-            ("Hit medi soffi ±1",    sim["sofi1_hit"].mean(),  "🔵"),
-            ("Hit medi coperti ±2-4",sim["sofi24_hit"].mean(),"🟠"),
-            ("Hit medi pool tot.",   sim["pool_hit"].mean(),   "🟢"),
-            ("Hit medi fuori pool",  sim["outside"].mean(),    "⚫"),
-        ]):
-            col.markdown(f'<div class="kpi"><div class="kv">{ico} {val:.3f}</div>'
-                         f'<div class="kl">{lab}</div></div>', unsafe_allow_html=True)
+    results = []
+    for combo in combinations(top_pool, 6):
+        s   = sorted(combo)
+        rng = s[5] - s[0]
+        if rng < r_min:
+            continue
+        if len(set(n // 10 for n in s)) < d_min:
+            continue
+        tot = sum(s)
+        if not (s_min <= tot <= s_max):
+            continue
+        results.append((sum(probs.get(n, 0) for n in s), s))
 
-        st.markdown("<br>", unsafe_allow_html=True)
+    results.sort(reverse=True)
 
-        # Rolling 100-draw hit rates
-        roll = sim[["ripe_hit","sofi1_hit","sofi24_hit","pool_hit","outside"]].rolling(100).mean()
-        fig_roll = go.Figure()
-        for col, name, color in [
-            ("ripe_hit",   "Ripetuti",   "#e74c3c"),
-            ("sofi1_hit",  "Soffi ±1",   "#3498db"),
-            ("sofi24_hit", "Coperti ±4", "#e67e22"),
-            ("pool_hit",   "Pool tot.",  "#2ecc71"),
-        ]:
-            fig_roll.add_trace(go.Scatter(
-                x=sim["draw"], y=roll[col], name=name,
-                line=dict(color=color, width=2), mode="lines",
-            ))
-        fig_roll.update_layout(
-            title="Hit rate per categoria — media mobile 100 draw",
-            xaxis_title="Draw #", yaxis_title="Hit medi su 6",
-            plot_bgcolor="#0a0e17", paper_bgcolor="#0a0e17",
-            font=dict(color="#e6edf3"), legend=dict(orientation="h", y=1.1),
-        )
-        st.plotly_chart(fig_roll, use_container_width=True)
+    # Fallback: relax constraints if nothing found
+    if not results:
+        for combo in combinations(top_pool, 6):
+            s = sorted(combo)
+            if s[5] - s[0] < 20:
+                continue
+            results.append((sum(probs.get(n, 0) for n in s), s))
+        results.sort(reverse=True)
 
-        # Distribuzione hit per categoria
-        col_a, col_b = st.columns(2)
-        for ax, field, title, color in [
-            (col_a, "ripe_hit",  "Distribuzione hit Ripetuti",  "#e74c3c"),
-            (col_b, "sofi1_hit", "Distribuzione hit Soffi ±1",  "#3498db"),
-        ]:
-            vc = sim[field].value_counts().sort_index()
-            fig = go.Figure(go.Bar(
-                x=[str(i) for i in vc.index],
-                y=vc.values/len(sim)*100,
-                marker_color=color,
-                text=[f"{v:.0f}%" for v in vc.values/len(sim)*100],
-                textposition="outside",
-            ))
-            fig.update_layout(
-                title=title, xaxis_title="N° hit", yaxis_title="%",
-                plot_bgcolor="#0a0e17", paper_bgcolor="#0a0e17",
-                font=dict(color="#e6edf3"), showlegend=False,
-            )
-            ax.plotly_chart(fig, use_container_width=True)
+    return results[:n_sestine]
 
-        # Summary table
-        st.markdown("### 📊 Statistiche empiriche complete")
-        stats_rows = []
-        for field, label in [
-            ("ripe_hit","🔴 Ripetuti"), ("sofi1_hit","🔵 Soffi ±1"),
-            ("sofi24_hit","🟠 Coperti ±2-4"), ("pool_hit","🟢 Pool tot."),
-            ("day_near","📅 Vicini al giorno"), ("delta_hit","📐 Predetti da delta"),
-        ]:
-            col = sim[field]
-            stats_rows.append({
-                "Segnale": label,
-                "Media": f"{col.mean():.3f}",
-                "P(=0)": f"{(col==0).mean()*100:.0f}%",
-                "P(≥1)": f"{(col>=1).mean()*100:.0f}%",
-                "P(≥2)": f"{(col>=2).mean()*100:.0f}%",
-                "P(≥3)": f"{(col>=3).mean()*100:.0f}%",
-                "Max": int(col.max()),
-            })
-        st.dataframe(pd.DataFrame(stats_rows), use_container_width=True, hide_index=True)
 
-        st.session_state["sim"] = sim
+# ── HTML HELPERS ──────────────────────────────────────────────────────────────
+def ball_html(n, css="out"):
+    return f'<span class="ball {css}">{n:02d}</span>'
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — CALIBRAZIONE
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab2:
-        st.subheader("📈 Calibrazione Automatica dei Segnali")
-        st.caption(
-            "Regressione logistica su 5000 draw: impara P(numero esce | segnali). "
-            "I coefficienti diventano i nuovi pesi del sistema."
-        )
 
-        run_calib = st.button("🔬 Calibra segnali (5000 draw)", use_container_width=True)
-        clf, scaler = None, None
+def pool_html(pool):
+    parts = (
+        [ball_html(n, "ripe")  for n in sorted(pool["ripetuti"])]
+        + [ball_html(n, "sofi1") for n in sorted(pool["soffi_1"])]
+        + [ball_html(n, "sofi2") for n in sorted(pool["soffi_24"])]
+    )
+    return "".join(parts)
 
-        if os.path.exists(FEAT_CACHE) and not run_calib:
-            with open(FEAT_CACHE,"rb") as f:
-                clf, scaler = pickle.load(f)
-            st.success("✅ Calibrazione caricata dalla cache.")
 
-        if run_calib:
-            prog2 = st.progress(0.0, text="Costruzione feature matrix…")
-            X, y, meta = build_features(df, start=WARMUP, max_draws=5000,
-                                         progress_cb=lambda v: prog2.progress(v, text=f"Feature: {v*100:.0f}%"))
-            prog2.progress(0.9, "Addestramento logistic regression…")
-            clf, scaler = train_corrector(X, y)
-            prog2.progress(1.0); prog2.empty()
-
-            with open(FEAT_CACHE,"wb") as f:
-                pickle.dump((clf, scaler), f)
-
-            # AUC
-            Xs = scaler.transform(X)
-            auc = roc_auc_score(y, clf.predict_proba(Xs)[:,1])
-            st.success(f"✅ Calibrazione completata. AUC = **{auc:.4f}**")
-
-        if clf is None:
-            st.info("Premi il pulsante per calibrare (serve la simulazione).")
+def sestina_html(nums, pool=None, actual=None):
+    parts = []
+    for n in sorted(nums):
+        if actual and n in actual:
+            css = "hit"
+        elif pool:
+            if   n in pool.get("ripetuti", set()):  css = "ripe"
+            elif n in pool.get("soffi_1",  set()):  css = "sofi1"
+            elif n in pool.get("soffi_24", set()):  css = "sofi2"
+            else:                                    css = "out"
         else:
-            # Coefficienti apprensi
-            coefs = clf.coef_[0]
-            feat_df = pd.DataFrame({
-                "Segnale": FEATURE_NAMES,
-                "Coefficiente": [round(c,4) for c in coefs],
-                "Peso relativo": [round(abs(c)/sum(abs(coefs))*100,1) for c in coefs],
-                "Direzione": ["🔼 Favorisce" if c>0 else "🔽 Penalizza" for c in coefs],
-            }).sort_values("Coefficiente", ascending=False)
+            css = "out"
+        parts.append(ball_html(n, css))
+    return "".join(parts)
 
-            st.markdown("### Coefficienti appresi (logistic regression)")
-            st.dataframe(feat_df, use_container_width=True, hide_index=True)
 
-            # Bar chart coefficienti
-            fig_coef = go.Figure(go.Bar(
-                x=feat_df["Segnale"], y=feat_df["Coefficiente"],
-                marker_color=["#2ecc71" if v>0 else "#e74c3c" for v in feat_df["Coefficiente"]],
-                text=[f"{v:+.3f}" for v in feat_df["Coefficiente"]],
-                textposition="outside",
-            ))
-            fig_coef.add_hline(y=0, line_dash="dash", line_color="#f0a500")
-            fig_coef.update_layout(
-                title="Pesi appresi: quanto ogni segnale predice P(numero esce)",
-                yaxis_title="Coefficiente", plot_bgcolor="#0a0e17",
-                paper_bgcolor="#0a0e17", font=dict(color="#e6edf3"), showlegend=False,
-            )
-            st.plotly_chart(fig_coef, use_container_width=True)
+def kpi_card(val, label, sub=""):
+    return (
+        f'<div class="kpi"><div class="kv">{val}</div>'
+        f'<div class="kl">{label}</div>'
+        + (f'<div class="kl">{sub}</div>' if sub else "")
+        + "</div>"
+    )
 
-            # Confronto pesi PRIMA (hardcoded) vs DOPO (appresi)
-            st.markdown("### Confronto: pesi originali App 1 vs pesi calibrati")
-            orig_weights = {
-                "Ripetuto": 1.5, "Soffio±1": 2.5, "Coperto±2-4": 2.0,
-                "Giorno": 1.0, "Freq50": 0.3, "DeltaPos": 2.0, "FuoriPool": 0.0,
-            }
-            comp_rows = []
-            for i, feat in enumerate(FEATURE_NAMES):
-                orig = orig_weights.get(feat, 0.0)
-                learn = coefs[i]
-                comp_rows.append({
-                    "Segnale": feat,
-                    "Peso originale App1": orig,
-                    "Coeff. calibrato": round(learn,4),
-                    "Cambiamento": "🔼 aumenta" if learn>orig else "🔽 riduce" if learn<orig else "≈ simile",
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+st.title("🧬 Meta-Learner — Signal Correction Engine")
+st.caption(
+    "Impara dagli errori reali di App 1 su 300 draw e corregge i segnali in tempo reale. "
+    "Zero data leakage — ogni draw usa solo dati precedenti."
+)
+
+df      = load_draws()
+df_hash = f"{len(df)}-{int(df.iloc[-1]['draw'])}"
+
+if len(df) < WARMUP + 20:
+    st.error(f"Servono almeno {WARMUP+20} estrazioni. Trovate: {len(df)}")
+    st.stop()
+
+# Run all strati (cached after first run)
+prec_tables, rolling_data, dyn_weights = compute_precision(df_hash, df)
+bias, fn_c, fp_c, num_bias, n_draws    = compute_decade_bias(df_hash, df)
+pos_means, pos_stds, pos_errors, pos_boost = compute_positional_analysis(df_hash, df)
+clf, scaler = train_meta_learner(df_hash, df, num_bias, pos_boost)
+
+next_probs, next_pool = predict_next_draw(df, clf, scaler, num_bias, pos_boost)
+top_sestine           = generate_sestine(next_pool, next_probs)
+
+# ── TABS ──────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Precision Storica",
+    "🎯 Errori per Decina",
+    "⚗️ Segnale Corretto",
+    "🔍 Verifica Storica",
+])
+
+CAT_COLORS = {
+    "Ripetuto":      "#e74c3c",
+    "Soffio±1": "#3498db",
+    "Coperto±2-4": "#e67e22",
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — PRECISION STORICA
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab1:
+    st.subheader("Precision reale per categoria (walk-forward, zero leakage)")
+    st.caption(
+        "P(cat) = hit_cat / volte_in_pool — walk-forward su ogni draw usando solo dati precedenti."
+    )
+
+    w100 = prec_tables.get(100)
+    if w100 is not None:
+        cols = st.columns(3)
+        for i, cat in enumerate(list(CAT_COLORS)):
+            with cols[i]:
+                if cat in w100.index:
+                    p   = w100.loc[cat, "precision"]
+                    h   = int(w100.loc[cat, "hits"])
+                    app = int(w100.loc[cat, "appearances"])
+                    st.markdown(
+                        kpi_card(f"{p:.1%}", cat, f"{h} hit / {app} in pool (100 draw)"),
+                        unsafe_allow_html=True,
+                    )
+
+    st.markdown("---")
+    st.markdown("#### Precision per finestra temporale")
+    trows = []
+    for ws in [50, 100, 200, 300]:
+        pt = prec_tables.get(ws)
+        if pt is None:
+            continue
+        for cat in list(CAT_COLORS):
+            if cat in pt.index:
+                trows.append({
+                    "Finestra":  f"{ws} draw",
+                    "Categoria": cat,
+                    "Precision": f"{pt.loc[cat,'precision']:.1%}",
+                    "Hit":       int(pt.loc[cat, "hits"]),
+                    "In Pool":   int(pt.loc[cat, "appearances"]),
+                    "Hit/Draw":  f"{pt.loc[cat,'hits'] / ws:.2f}",
                 })
-            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+    if trows:
+        st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
 
-            st.session_state["clf"] = clf
-            st.session_state["scaler"] = scaler
+    st.markdown("---")
+    st.markdown("#### Precision cumulativa nel tempo")
+    fig = go.Figure()
+    for cat, color in CAT_COLORS.items():
+        rd = rolling_data.get(cat, {})
+        if rd:
+            fig.add_trace(go.Scatter(
+                x=rd["draw"], y=rd["rolling_prec"],
+                name=cat, line=dict(color=color, width=2), mode="lines",
+            ))
+    fig.update_layout(
+        template="plotly_dark", height=350,
+        xaxis_title="Draw #", yaxis_title="Precision cumulativa",
+        yaxis_tickformat=".0%",
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117", margin=dict(t=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — SEGNALE CORRETTO
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab3:
-        st.subheader(f"⚗️ Sestina Corretta per Draw #{nx}")
-        st.caption("Generata dal modello calibrato su 7000+ draw. Aggiornamento automatico ad ogni nuova estrazione.")
+    st.markdown("#### Pesi dinamici vs originali App 1")
+    orig_w = {"Ripetuto": 1.5, "Soffio±1": 2.5, "Coperto±2-4": 2.0}
+    wcols  = st.columns(3)
+    for i, cat in enumerate(list(CAT_COLORS)):
+        with wcols[i]:
+            w     = dyn_weights[cat]
+            delta = w - orig_w[cat]
+            arrow = "▲" if delta > 0 else "▼"
+            color = "#2ecc71" if delta > 0 else "#e74c3c"
+            st.markdown(
+                kpi_card(
+                    f"{w:.3f}", cat,
+                    f"Originale: {orig_w[cat]:.1f} &nbsp; "
+                    f'<span style="color:{color}">{arrow} {abs(delta):.3f}</span>',
+                ),
+                unsafe_allow_html=True,
+            )
 
-        clf  = st.session_state.get("clf")
-        scaler = st.session_state.get("scaler")
 
-        if clf is None:
-            if os.path.exists(FEAT_CACHE):
-                with open(FEAT_CACHE,"rb") as f:
-                    clf, scaler = pickle.load(f)
-                st.session_state["clf"] = clf
-                st.session_state["scaler"] = scaler
-            else:
-                st.warning("Prima calibra il modello nel tab **📈 Calibrazione**.")
-                return
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — ERRORI PER DECINA
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.subheader("Errori sistematici per decina")
+    st.caption(
+        f"Analisi su {n_draws} draw. FP = in pool ma non uscito. FN = uscito ma non in pool. "
+        "Bias = (FP-FN)/draw — positivo → sovrastimata → penalizzata."
+    )
 
-        probs, ripe, s1, s24 = predict_proba_all(clf, scaler, df)
-        sestina, top20 = best_sestina_from_probs(probs)
+    decade_names = [d[0] for d in DECADES]
+    cols = st.columns(5)
+    for i, dname in enumerate(decade_names):
+        with cols[i]:
+            b     = bias[dname]
+            color = "#e74c3c" if b > 0.5 else ("#2ecc71" if b < -0.5 else "#8b949e")
+            label = "Sovrastimata" if b > 0.5 else ("Sottostimata" if b < -0.5 else "Bilanciata")
+            st.markdown(
+                kpi_card(f"{b:+.2f}", dname,
+                         f"{label} · FP:{fp_c[dname]} FN:{fn_c[dname]}"),
+                unsafe_allow_html=True,
+            )
 
-        # Show sestina
-        st.markdown(f"### 🏆 Sestina calibrata #{nx}")
-        balls_html = ""
-        for n in sestina:
-            if n in ripe:  cls = "ripe"
-            elif n in s1:  cls = "sofi1"
-            elif n in s24: cls = "sofi2"
-            else:          cls = "ml"
-            balls_html += ball(n, cls)
-        st.markdown(balls_html, unsafe_allow_html=True)
+    st.markdown("---")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        name="Falsi Positivi (in pool, non uscito)",
+        x=decade_names, y=[fp_c[d] for d in decade_names],
+        marker_color="#e74c3c",
+    ))
+    fig2.add_trace(go.Bar(
+        name="Falsi Negativi (uscito, non in pool)",
+        x=decade_names, y=[fn_c[d] for d in decade_names],
+        marker_color="#2ecc71",
+    ))
+    fig2.update_layout(
+        barmode="group", template="plotly_dark", height=320,
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117",
+        margin=dict(t=10), yaxis_title="Conteggio",
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
-        lp = laws_pass(sestina)
-        sc = sum(probs[n] for n in sestina)
-        st.markdown(f"Leggi: **{lp}/11** &nbsp;|&nbsp; Score prob: **{sc:.4f}** &nbsp;|&nbsp; "
-                    f"Somma: {sum(sestina)} · Range: {max(sestina)-min(sestina)}")
+    st.markdown("#### Bias netto (FP-FN)/draw per decina")
+    fig3 = go.Figure(go.Bar(
+        x=decade_names,
+        y=[bias[d] for d in decade_names],
+        marker_color=["#e74c3c" if bias[d] > 0 else "#2ecc71" for d in decade_names],
+        text=[f"{bias[d]:+.2f}" for d in decade_names],
+        textposition="outside",
+    ))
+    fig3.update_layout(
+        template="plotly_dark", height=270,
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117",
+        margin=dict(t=30), yaxis_title="Bias",
+    )
+    st.plotly_chart(fig3, use_container_width=True)
 
-        # Top 20 con probabilità
-        st.markdown("### 📊 Top 20 candidati per probabilità")
-        prob_df = pd.DataFrame([
-            {"N°": n, "P(esce)": f"{p*100:.2f}%",
-             "Categoria": "Ripetuto" if n in ripe else
-                          "Soffio±1" if n in s1   else
-                          "Coperto±2-4" if n in s24 else "Fuori pool",
-             "In sestina": "✅" if n in sestina else ""}
-            for n,p in top20
-        ])
-        st.dataframe(prob_df, use_container_width=True, hide_index=True)
+    st.markdown("#### Top 20 numeri più sbilanciati")
+    bias_rows = sorted(
+        [(n, num_bias.get(n, 0.0)) for n in range(1, 50)],
+        key=lambda x: abs(x[1]), reverse=True,
+    )
+    bdf = pd.DataFrame([{
+        "Numero":   n,
+        "Bias":     f"{b:+.3f}",
+        "Effetto":  "Penalizzato" if b > 0 else "Premiato",
+        "Decina":   next(dn for dn, ds in DECADES if n in ds),
+    } for n, b in bias_rows[:20]])
+    st.dataframe(bdf, use_container_width=True, hide_index=True)
 
-        # Heatmap 1-49 probability
-        prob_arr = np.array([probs[n] for n in range(1,50)]).reshape(7,7)
-        fig_heat = go.Figure(go.Heatmap(
-            z=prob_arr,
-            x=[str(c*7+1)+"-"+str((c+1)*7) for c in range(7)],
-            y=[str(r) for r in range(7)],
-            text=[[f"{n:02d}\n{probs[n]*100:.1f}%" for n in range(r*7+1, min(50, (r+1)*7+1))]
-                  for r in range(7)],
-            texttemplate="%{text}",
-            colorscale="RdYlGn", showscale=True,
-            hovertemplate="Num %{text}: %{z:.4f}<extra></extra>",
-        ))
-        fig_heat.update_layout(
-            title=f"Probabilità P(esce) per ciascun numero 1-49 — draw #{nx}",
-            plot_bgcolor="#0a0e17", paper_bgcolor="#0a0e17",
-            font=dict(color="#e6edf3"),
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — SEGNALE CORRETTO
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    last_draw_num = int(df.iloc[-1]["draw"])
+    st.subheader(f"⚗️ Segnale Corretto — Prossima draw dopo #{last_draw_num}")
+    st.caption(
+        f"Numeri re-rankati SOLO dal pool di App 1 con probabilità Meta-Learner. "
+        f"Vincoli: range ≥ {RANGE_MIN}, ≥ {MIN_DECADES} decine, somma {SUM_MIN}-{SUM_MAX}."
+    )
+
+    st.markdown("**Pool App 1:** " + pool_html(next_pool), unsafe_allow_html=True)
+    st.caption(
+        f"Ripetuti: {len(next_pool['ripetuti'])} | "
+        f"Soffi±1: {len(next_pool['soffi_1'])} | "
+        f"Coperti±2-4: {len(next_pool['soffi_24'])} | "
+        f"Totale: {len(next_pool['pool_all'])}"
+    )
+    st.markdown("---")
+
+    if not top_sestine:
+        st.error("Nessuna sestina trovata. Pool troppo piccolo o vincoli troppo stretti.")
+    else:
+        for rank, (score, sestina) in enumerate(top_sestine, 1):
+            pari = sum(1 for n in sestina if n % 2 == 0)
+            rng  = max(sestina) - min(sestina)
+            tot  = sum(sestina)
+            dec  = len(set(n // 10 for n in sestina))
+
+            st.markdown(f"### #{rank}  —  Score ML: {score:.4f}")
+            st.markdown(sestina_html(sestina, pool=next_pool), unsafe_allow_html=True)
+
+            details = []
+            for n in sorted(sestina):
+                cat = ("Ripetuto"     if n in next_pool["ripetuti"]  else
+                       "Soffio±1"    if n in next_pool["soffi_1"]   else
+                       "Coperto±2-4" if n in next_pool["soffi_24"]  else "—")
+                p   = next_probs.get(n, 0)
+                b   = num_bias.get(n, 0)
+                tag = "▲ premiato" if b < -0.2 else ("▼ penalizzato" if b > 0.2 else "≈ neutro")
+                details.append(
+                    f"**{n:02d}** {cat} · p={p:.2%} · bias={b:+.2f} {tag}"
+                )
+            for line in details:
+                st.markdown(f"- {line}")
+            st.caption(
+                f"Range: {rng} | Somma: {tot} | Decine: {dec} | "
+                f"Pari: {pari} | Dispari: {6-pari}"
+            )
+            st.markdown("---")
+
+    # Probability heatmap 1-49
+    st.markdown("#### P(esce) — tutti i 49 numeri")
+    bar_colors = [
+        "#e74c3c" if n in next_pool["ripetuti"]  else
+        "#3498db" if n in next_pool["soffi_1"]   else
+        "#e67e22" if n in next_pool["soffi_24"]  else
+        "#2c3e50"
+        for n in range(1, 50)
+    ]
+    fig_h = go.Figure(go.Bar(
+        x=list(range(1, 50)),
+        y=[next_probs.get(n, 0) for n in range(1, 50)],
+        marker_color=bar_colors,
+        hovertemplate="%{x}: %{y:.2%}<extra></extra>",
+    ))
+    fig_h.update_layout(
+        template="plotly_dark", height=300,
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117",
+        xaxis_title="Numero", yaxis_title="P(esce)",
+        yaxis_tickformat=".0%", margin=dict(t=10),
+    )
+    st.plotly_chart(fig_h, use_container_width=True)
+
+    st.markdown("#### Coefficienti Meta-Learner")
+    coef_df = pd.DataFrame({
+        "Feature":      FEATURE_NAMES,
+        "Coefficiente": clf.coef_[0],
+    }).sort_values("Coefficiente", ascending=False)
+    coef_df["Direzione"] = coef_df["Coefficiente"].apply(
+        lambda c: "▲ Promuove" if c > 0 else "▼ Penalizza"
+    )
+    st.dataframe(coef_df, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — VERIFICA STORICA
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("🔍 Verifica Storica — Meta-Learner vs App 1")
+    st.caption(
+        "Seleziona una draw passata. Pool e feature calcolati con soli dati precedenti. "
+        "Il modello LR è globale (trained su tutto lo storico disponibile)."
+    )
+
+    total_draws = len(df)
+    min_idx     = WARMUP + 10
+    draw_nums   = [int(df.iloc[i]["draw"]) for i in range(min_idx, total_draws)]
+    default_i   = max(0, len(draw_nums) - 2)
+
+    sel_draw = st.selectbox("Draw da verificare", draw_nums, index=default_i)
+    sel_idx  = int(df.index[df["draw"] == sel_draw][0])
+    sel_date = str(df.iloc[sel_idx]["date"])[:10]
+    sel_act  = set(get_nums(df.iloc[sel_idx]))
+
+    hist_probs, hist_pool = predict_proba_for(
+        df, sel_idx, clf, scaler, num_bias, pos_boost
+    )
+    hist_ml   = generate_sestine(hist_pool, hist_probs, n_sestine=3)
+    app1_w    = {
+        n: (1.5 if n in hist_pool["ripetuti"] else
+            2.5 if n in hist_pool["soffi_1"]  else
+            2.0 if n in hist_pool["soffi_24"] else 0.0)
+        for n in range(1, 50)
+    }
+    hist_app1 = generate_sestine(hist_pool, app1_w, n_sestine=1)
+
+    # Result header
+    col_r, col_p = st.columns(2)
+    with col_r:
+        st.markdown(f"**Draw #{sel_draw}** ({sel_date})")
+        st.markdown("**Risultato reale:**")
+        st.markdown(sestina_html(sel_act, pool=hist_pool), unsafe_allow_html=True)
+        psize = len(hist_pool["pool_all"])
+        inp   = len(sel_act & hist_pool["pool_all"])
+        st.caption(
+            f"Pool: {psize} | Nel pool: {inp}/6 | "
+            f"Ripe: {len(sel_act & hist_pool['ripetuti'])} | "
+            f"Sofi: {len(sel_act & hist_pool['soffi_1'])} | "
+            f"Cop: {len(sel_act & hist_pool['soffi_24'])}"
         )
-        st.plotly_chart(fig_heat, use_container_width=True)
+    with col_p:
+        st.markdown("**Pool App 1:**")
+        st.markdown(pool_html(hist_pool), unsafe_allow_html=True)
 
-        # Barchart probability
-        fig_bar = go.Figure(go.Bar(
-            x=list(range(1,50)),
-            y=[probs[n]*100 for n in range(1,50)],
-            marker_color=["#2ecc71" if n in sestina else
-                          "#e74c3c" if n in ripe else
-                          "#3498db" if n in s1  else
-                          "#e67e22" if n in s24 else "#2c3e50"
-                          for n in range(1,50)],
-            hovertemplate="N° %{x}: %{y:.2f}%<extra></extra>",
-        ))
-        fig_bar.update_layout(
-            title="Probabilità per numero (verde = in sestina)",
-            xaxis_title="Numero", yaxis_title="P(esce) %",
-            plot_bgcolor="#0a0e17", paper_bgcolor="#0a0e17",
-            font=dict(color="#e6edf3"),
+    st.markdown("---")
+    st.markdown("#### Meta-Learner — top-3 sestine (pesi calibrati)")
+    best_ml = 0
+    if not hist_ml:
+        st.warning("Nessuna sestina trovata.")
+    else:
+        for rank, (score, sestina) in enumerate(hist_ml, 1):
+            hits    = len(set(sestina) & sel_act)
+            best_ml = max(best_ml, hits)
+            mark    = "🎯" * hits if hits else "❌"
+            st.markdown(f"**ML #{rank}** &nbsp; {mark} {hits}/6 hit &nbsp; Score: {score:.4f}")
+            st.markdown(
+                sestina_html(sestina, pool=hist_pool, actual=sel_act),
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Range: {max(sestina)-min(sestina)} | Somma: {sum(sestina)} | "
+                f"Decine: {len(set(n//10 for n in sestina))}"
+            )
+            st.markdown("---")
+
+    st.markdown("#### App 1 — sestina con pesi fissi")
+    best_a1 = 0
+    if hist_app1:
+        _, a1_best = hist_app1[0]
+        best_a1    = len(set(a1_best) & sel_act)
+        mark1      = "🎯" * best_a1 if best_a1 else "❌"
+        st.markdown(f"**App 1 #1** &nbsp; {mark1} {best_a1}/6 hit")
+        st.markdown(
+            sestina_html(a1_best, pool=hist_pool, actual=sel_act),
+            unsafe_allow_html=True,
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.caption(f"Range: {max(a1_best)-min(a1_best)} | Somma: {sum(a1_best)}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — DEBUG PER DRAW
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab4:
-        st.subheader("🔍 Analisi draw specifica")
-        sim_loaded = st.session_state.get("sim")
-        if sim_loaded is None and os.path.exists(SIM_CACHE):
-            with open(SIM_CACHE,"rb") as f:
-                sim_loaded = pickle.load(f)
+    st.markdown("---")
+    if best_ml > best_a1:
+        st.success(f"✅ Meta-Learner vince: {best_ml} hit vs App 1: {best_a1} hit")
+    elif best_ml == best_a1:
+        st.info(f"↔️ Pareggio: entrambi {best_ml} hit")
+    else:
+        st.warning(f"⚠️ App 1 vince: {best_a1} hit vs Meta-Learner: {best_ml} hit")
 
-        if sim_loaded is None:
-            st.info("Avvia prima la simulazione.")
-            return
-
-        draw_min = int(sim_loaded["draw"].min())
-        draw_max = int(sim_loaded["draw"].max())
-        sel = st.slider("Seleziona draw #", draw_min, draw_max, draw_max)
-
-        row_sel = sim_loaded[sim_loaded["draw"] == sel]
-        if row_sel.empty:
-            st.warning("Draw non trovata nella simulazione.")
-            return
-
-        row = row_sel.iloc[0]
-        idx = int(row["idx"])
-
-        prev_nums = get_nums(df.iloc[idx-1])
-        curr_nums = get_nums(df.iloc[idx])
-
-        col_p, col_c = st.columns(2)
-        with col_p:
-            st.markdown(f"**Draw #{sel-1}** (base)")
-            st.markdown("".join(ball(n,"sofi1") for n in prev_nums), unsafe_allow_html=True)
-        with col_c:
-            st.markdown(f"**Draw #{sel}** (reale)")
-            ripe_s, s1_s, s24_s = build_pool(prev_nums)
-            hits_html = ""
-            for n in curr_nums:
-                cls = "ripe" if n in ripe_s else "sofi1" if n in s1_s else \
-                      "sofi2" if n in s24_s else "out"
-                hits_html += ball(n, cls)
-            st.markdown(hits_html, unsafe_allow_html=True)
-
-        st.markdown("---")
-        m1,m2,m3,m4,m5 = st.columns(5)
-        for col,(lab,val) in zip([m1,m2,m3,m4,m5],[
-            ("Ripetuti hit", int(row["ripe_hit"])),
-            ("Soffi±1 hit", int(row["sofi1_hit"])),
-            ("Coperti hit", int(row["sofi24_hit"])),
-            ("Pool tot hit", int(row["pool_hit"])),
-            ("Fuori pool", int(row["outside"])),
-        ]):
-            col.markdown(f'<div class="kpi"><div class="kv">{val}</div>'
-                         f'<div class="kl">{lab}</div></div>', unsafe_allow_html=True)
-
-        # show which actual numbers fell in which category
-        st.markdown("#### Categoria di ciascun numero uscito")
-        cat_rows = []
-        for n in curr_nums:
-            rp,s1_,s24_ = build_pool(prev_nums)
-            d_min = min(abs(n-b) for b in prev_nums)
-            cat_rows.append({
-                "Numero": n,
-                "Categoria": "🔴 Ripetuto" if n in rp else
-                             "🔵 Soffio±1" if n in s1_ else
-                             f"🟠 Coperto±{d_min}" if n in s24_ else
-                             f"⚫ Fuori pool (dist {d_min})",
-                "Dist. min da N-1": d_min,
+    with st.expander("Dettaglio probabilità tutti i numeri del pool"):
+        prows = []
+        for n in sorted(hist_pool["pool_all"]):
+            cat = ("Ripetuto"     if n in hist_pool["ripetuti"]  else
+                   "Soffio±1"    if n in hist_pool["soffi_1"]   else
+                   "Coperto±2-4")
+            prows.append({
+                "Numero":    n,
+                "Categoria": cat,
+                "P(ML)":     f"{hist_probs.get(n,0):.2%}",
+                "P(App1)":   f"{app1_w.get(n,0):.2f}",
+                "Uscito":    "✅" if n in sel_act else "—",
             })
-        st.dataframe(pd.DataFrame(cat_rows), use_container_width=True, hide_index=True)
-
-
-main()
+        st.dataframe(pd.DataFrame(prows), use_container_width=True, hide_index=True)
