@@ -94,53 +94,75 @@ _HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+_HEADERS_JSON = {**_HEADERS, "Accept": "application/json, text/plain, */*"}
+
+
+def _valid_6(nums) -> list | None:
+    """Return sorted valid lotto draw or None."""
+    if not nums or len(nums) < 6:
+        return None
+    s = sorted(set(int(x) for x in nums if 1 <= int(x) <= 49))
+    if len(s) == 6:
+        return s
+    return None
 
 
 def _extract_lotto_nums(html: str):
-    """
-    Try multiple parsing strategies to extract exactly 6 valid lotto numbers (1-49)
-    from an HTML page. Returns sorted list of 6 ints or None.
-    """
-    # Strategy 1: JSON embedded — look for array of 6 numbers 1-49
+    """Try multiple parsing strategies to extract 6 valid lotto numbers from HTML/JSON."""
+    import json as _json
+
+    # Strategy 1: full JSON parse — look for "results", "numbers", "wyniki" keys
+    for chunk in re.findall(r'\{[^{}]{30,2000}\}', html):
+        try:
+            obj = _json.loads(chunk)
+            for key in ("results", "numbers", "wyniki", "balls", "losowania", "drawn"):
+                if key in obj:
+                    v = obj[key]
+                    if isinstance(v, list):
+                        r = _valid_6(v)
+                        if r:
+                            return r
+        except Exception:
+            pass
+
+    # Strategy 2: JSON array of exactly 6 numbers 1-49
     json_pattern = re.compile(r'\[(\s*\d+\s*(?:,\s*\d+\s*){5})\]')
     for m in json_pattern.finditer(html):
         parts = [int(x) for x in m.group(1).split(",")]
-        if len(parts) == 6 and all(1 <= x <= 49 for x in parts) and len(set(parts)) == 6:
-            s = sorted(parts)
-            if s[-1] - s[0] > 20:
-                return s
+        r = _valid_6(parts)
+        if r:
+            return r
 
-    # Strategy 2: HTML ball elements — spans/divs with class containing "ball" or "liczba"
-    ball_pat = re.compile(
-        r'class="[^"]*(?:ball|liczba|lotto-ball|result-ball|number)[^"]*"[^>]*>\s*(\d{1,2})\s*<',
-        re.IGNORECASE,
-    )
-    ball_nums = []
-    for m in ball_pat.finditer(html):
-        n = int(m.group(1))
-        if 1 <= n <= 49 and n not in ball_nums:
-            ball_nums.append(n)
-        if len(ball_nums) == 6:
-            s = sorted(ball_nums)
-            if s[-1] - s[0] > 20:
-                return s
-            ball_nums = []
+    # Strategy 3: HTML ball/number elements (classes or data-attributes)
+    for pat in [
+        re.compile(r'data-(?:number|value|ball|result)="(\d{1,2})"', re.I),
+        re.compile(
+            r'class="[^"]*(?:ball|liczba|lotto-ball|result-ball|result-number|number|kula)[^"]*"'
+            r'[^>]*>\s*(\d{1,2})\s*<', re.I),
+        re.compile(r'<(?:span|div|li|td)[^>]*>\s*(\d{1,2})\s*</(?:span|div|li|td)>', re.I),
+    ]:
+        nums = []
+        for m in pat.finditer(html):
+            n = int(m.group(1))
+            if 1 <= n <= 49 and n not in nums:
+                nums.append(n)
+            if len(nums) >= 6:
+                r = _valid_6(nums[:6])
+                if r:
+                    return r
+                nums = nums[1:]
 
-    # Strategy 3: data-number or data-value attributes
-    data_pat = re.compile(r'data-(?:number|value|ball)="(\d{1,2})"', re.IGNORECASE)
-    data_nums = []
-    for m in data_pat.finditer(html):
-        n = int(m.group(1))
-        if 1 <= n <= 49 and n not in data_nums:
-            data_nums.append(n)
-        if len(data_nums) == 6:
-            s = sorted(data_nums)
-            if s[-1] - s[0] > 20:
-                return s
-            data_nums = []
+    # Strategy 4: wynikilotto.net.pl specific — table cells in sequence
+    tds = re.findall(r'<td[^>]*>\s*(\d{1,2})\s*</td>', html, re.I)
+    for i in range(len(tds) - 5):
+        candidate = [int(tds[i + j]) for j in range(6)]
+        r = _valid_6(candidate)
+        if r:
+            return r
 
-    # Strategy 4: sliding window of 6 unique 1-49 numbers (fallback, conservative)
+    # Strategy 5: fallback sliding window (relaxed range check ≥ 10)
     all_nums = [int(x) for x in re.findall(r'\b([1-9]|[1-4]\d)\b', html)]
     window = []
     for n in all_nums:
@@ -148,35 +170,85 @@ def _extract_lotto_nums(html: str):
             window.append(n)
         if len(window) == 6:
             s = sorted(window)
-            # strict validation: span > 25, all unique, no obvious date numbers
-            if s[-1] - s[0] > 25 and s[5] <= 49:
+            if s[-1] - s[0] >= 10 and s[5] <= 49:
                 return s
             window.pop(0)
 
     return None
 
 
+def _fetch_lotto_pl_api(draw_date_str: str):
+    """Try lotto.pl official JSON API endpoints. Returns sorted list[int] or None."""
+    import json as _json
+    y, m, d = draw_date_str[:4], draw_date_str[5:7], draw_date_str[8:10]
+    api_urls = [
+        f"https://www.lotto.pl/api/lotteries/draw-results/by-date?game=Lotto&drawDate={y}-{m}-{d}",
+        f"https://www.lotto.pl/api/lotteries/draw-results/by-date?game=Lotto&drawDate={y}{m}{d}",
+        f"https://www.lotto.pl/lotto/wyniki-i-wygrane/wyniki-losowania/{y}-{m}-{d}",
+    ]
+    for url in api_urls:
+        try:
+            r = requests.get(url, headers=_HEADERS_JSON, timeout=12)
+            if r.status_code != 200:
+                continue
+            # Try JSON parse first
+            try:
+                data = r.json()
+                # lotto.pl API typically returns {"results": [...], "numbers": [...]}
+                for key in ("numbers", "results", "wyniki", "balls", "drawn"):
+                    v = data.get(key) if isinstance(data, dict) else None
+                    if v and isinstance(v, list):
+                        res = _valid_6(v)
+                        if res:
+                            return res
+                # nested: data["items"][0]["results"]
+                if isinstance(data, dict):
+                    items = data.get("items") or data.get("draws") or data.get("data") or []
+                    if isinstance(items, list) and items:
+                        first = items[0]
+                        if isinstance(first, dict):
+                            for key in ("numbers", "results", "wyniki", "balls"):
+                                v = first.get(key)
+                                if v and isinstance(v, list):
+                                    res = _valid_6(v)
+                                    if res:
+                                        return res
+            except Exception:
+                pass
+            # Fallback: HTML parse
+            res = _extract_lotto_nums(r.text)
+            if res:
+                return res
+        except Exception:
+            continue
+    return None
+
+
 def fetch_draw_for_date(draw_date_str: str):
     """
     Fetch 6 Kumulacja numbers for a given date (YYYY-MM-DD).
-    Tries multiple Polish lotto result sites. Returns sorted list[int] or None.
+    Tries lotto.pl API first, then multiple Polish result sites.
+    Returns sorted list[int] or None.
     """
     y, m, d = draw_date_str[:4], draw_date_str[5:7], draw_date_str[8:10]
 
-    urls = [
-        # wynikilotto.net.pl — main source
-        f"https://www.wynikilotto.net.pl/lotto/wyniki/{y}/{m}/{d}/",
-        # pewniaki.pl — backup
-        f"https://pewniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
-        # lotto.pl — official (HTML, might block bots)
-        f"https://www.lotto.pl/lotto/wyniki-i-wygrane/wyniki-losowania/{y}-{m}-{d}",
-        # totalniaki.pl
-        f"https://totalniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
-    ]
+    # 1) lotto.pl official API
+    res = _fetch_lotto_pl_api(draw_date_str)
+    if res:
+        return res
 
+    # 2) HTML scraping fallback sites
+    urls = [
+        f"https://www.wynikilotto.net.pl/lotto/wyniki/{y}/{m}/{d}/",
+        f"https://wynikilotto.net.pl/wyniki-lotto/{y}-{m}-{d}/",
+        f"https://pewniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
+        f"https://totalniaki.pl/wyniki-lotto/{y}-{m}-{d}/",
+        f"https://lotto24.pl/wyniki-lotto/{y}-{m}-{d}/",
+        f"https://lotto.org.pl/lotto/{y}/{m}/{d}/",
+    ]
     for url in urls:
         try:
-            resp = requests.get(url, headers=_HEADERS, timeout=10)
+            resp = requests.get(url, headers=_HEADERS, timeout=12)
             if resp.status_code != 200:
                 continue
             result = _extract_lotto_nums(resp.text)
@@ -580,23 +652,39 @@ def render_sidebar(df):
         # ── Auto-fetch manuale (forza ricerca)
         st.markdown("### 🌐 Forza aggiornamento")
         st.caption("Riesegui la ricerca online delle draw mancanti.")
+        show_debug = st.checkbox("🐛 Mostra dettagli fetch", value=False, key="fetch_debug")
         if st.button("🔍 Cerca ora", use_container_width=True):
             missing = get_missing_draw_dates(df)
             if not missing:
                 st.success("✅ Database già aggiornato!")
             else:
                 with st.spinner(f"Cerco {len(missing)} draw…"):
-                    _, n_added, messages = auto_update_draws(df)
+                    df_up, n_added, messages = auto_update_draws(df)
                 if n_added:
-                    for m in messages:
-                        st.success(m)
+                    for msg in messages:
+                        st.success(msg)
                     st.cache_data.clear()
                     st.rerun()
                 else:
                     st.warning(
-                        f"Nessuna trovata online per: {', '.join(missing)}\n"
+                        f"⚠️ Nessuna trovata online per: {', '.join(missing)}\n\n"
                         "Inseriscile manualmente sopra."
                     )
+                    if show_debug:
+                        y, mo, d_str = missing[0][:4], missing[0][5:7], missing[0][8:10]
+                        st.markdown("**Siti testati:**")
+                        test_urls = [
+                            f"https://www.lotto.pl/api/lotteries/draw-results/by-date?game=Lotto&drawDate={missing[0]}",
+                            f"https://www.wynikilotto.net.pl/lotto/wyniki/{y}/{mo}/{d_str}/",
+                            f"https://pewniaki.pl/wyniki-lotto/{missing[0]}/",
+                            f"https://totalniaki.pl/wyniki-lotto/{missing[0]}/",
+                        ]
+                        for tu in test_urls:
+                            try:
+                                tr = requests.get(tu, headers=_HEADERS_JSON, timeout=8)
+                                st.code(f"{tr.status_code} — {tu}", language="")
+                            except Exception as e:
+                                st.code(f"ERR {e} — {tu}", language="")
 
         st.markdown("---")
         st.caption("💡 Se l'auto-fetch fallisce, inserisci i numeri manualmente sopra.")
