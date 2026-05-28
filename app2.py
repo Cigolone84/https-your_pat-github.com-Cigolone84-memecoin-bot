@@ -31,6 +31,7 @@ st.markdown("""<style>
   .ripe{background:#e74c3c;color:#fff}
   .sofi1{background:#3498db;color:#fff}
   .sofi2{background:#e67e22;color:#fff}
+  .wild{background:#9b59b6;color:#fff;border:2px solid #d2a8ff}
   .hit{background:#2ecc71;color:#000}
   .out{background:#2c3e50;color:#8b949e;border:1px solid #444}
   hr{border-color:#30363d}
@@ -48,6 +49,8 @@ POS_WINDOW    = 100
 SUM_MIN, SUM_MAX = 75, 215
 RANGE_MIN     = 25
 MIN_DECADES   = 3
+WILD_DECADE_WINDOW = 200   # window for wildcard FN/overdue study
+CEILING_WINDOW     = 300   # window for pool-ceiling study
 FEATURE_NAMES = ["Cat Precision", "Decade Corr",
                  "Freq Rel", "Ritardo Rel", "Pos Boost",
                  "Is Ripetuto", "Is Soffio±1"]
@@ -420,30 +423,95 @@ def predict_next_draw(df, clf, scaler, prec_weights, num_bias, pos_boost):
     return full_probs, pool
 
 
+# ── WILDCARD (Strato 2 → fuori pool) ──────────────────────────────────────────
+def build_wildcards(df, ref_idx, pool, n_wild=2, window=WILD_DECADE_WINDOW):
+    """Inietta numeri fuori dal pool dalla decina più SOTTOSTIMATA.
+
+    Studia gli ultimi `window` draw prima di ref_idx: per ogni decina conta
+    i falsi negativi (uscito ma NON nel pool del momento). La decina con più
+    FN è quella che il sistema 2+2+2+2 ignora di più (es. D1 dopo una draw
+    senza numeri bassi). Da quella decina sceglie i numeri NON nel pool più
+    'overdue' (ritardo alto) come candidati wildcard.
+
+    Returns sorted list di numeri wildcard (lunghezza ≤ n_wild).
+    """
+    if n_wild <= 0:
+        return []
+
+    start = max(0, ref_idx - window)
+    fn_by_decade = {d[0]: 0 for d in DECADES}
+    for i in range(start, ref_idx):
+        if i < 1:
+            continue
+        actual   = set(get_nums(df.iloc[i]))
+        pool_set = build_pool_at(df, i - 1)["pool_all"]
+        for dname, dset in DECADES:
+            fn_by_decade[dname] += len((actual & dset) - pool_set)
+
+    # ritardo: draws dall'ultima uscita di ogni numero
+    last_seen = {}
+    for j in range(max(0, ref_idx - 400), ref_idx):
+        for n in get_nums(df.iloc[j]):
+            last_seen[n] = j
+    ritardo = {n: (ref_idx - last_seen[n] - 1) if n in last_seen else 400
+               for n in range(1, 50)}
+
+    # decine ordinate per FN decrescente
+    ranked_dec = sorted(DECADES, key=lambda d: fn_by_decade[d[0]], reverse=True)
+
+    wild = []
+    for dname, dset in ranked_dec:
+        if len(wild) >= n_wild:
+            break
+        # candidati fuori pool in questa decina, ordinati per ritardo (più overdue prima)
+        cands = sorted(
+            [n for n in dset if n not in pool["pool_all"]],
+            key=lambda n: ritardo[n], reverse=True,
+        )
+        for n in cands:
+            if len(wild) >= n_wild:
+                break
+            wild.append(n)
+    return sorted(wild[:n_wild])
+
+
 # ── STRATO 5: SESTINA FINALE ──────────────────────────────────────────────────
 def generate_sestine(pool, probs, n_sestine=3,
                      s_min=SUM_MIN, s_max=SUM_MAX,
                      r_min=RANGE_MIN, d_min=MIN_DECADES,
-                     min_cat_each=1):
+                     min_cat_each=1, wildcards=None, max_wild=1):
     """Re-rank pool numbers by calibrated probs, apply hard constraints.
 
     min_cat_each=1 enforces ≥1 number from each pool category (ripe/sofi/cop).
-    This prevents the LR from filling the sestina with only high-precision
-    ripetuti and ignoring coperti that are statistically likely.
+    wildcards: numeri fuori pool (da build_wildcards) aggiunti ai candidati;
+    al massimo `max_wild` per sestina, così non snaturano la struttura 2+2+2+2.
     """
-    pool_ranked = sorted(pool["pool_all"], key=lambda x: probs.get(x, 0), reverse=True)
-    top_pool    = pool_ranked[:min(28, len(pool_ranked))]
+    wildcards   = set(wildcards or [])
     ripe  = pool["ripetuti"]
     sofi  = pool["soffi_1"]
     cop   = pool["soffi_24"]
 
-    def _valid(s):
+    # I wildcard non hanno prob dal modello → diamo loro la prob mediana del pool
+    pool_ranked = sorted(pool["pool_all"], key=lambda x: probs.get(x, 0), reverse=True)
+    top_pool    = pool_ranked[:min(28, len(pool_ranked))]
+    if wildcards:
+        med_p = float(np.median([probs.get(n, 0) for n in pool_ranked])) if pool_ranked else 0.0
+        for w in wildcards:
+            probs.setdefault(w, med_p)
+    candidates = list(top_pool) + sorted(wildcards)
+
+    def _valid(s, allow_relax=False):
         if s[5] - s[0] < r_min:
             return False
-        if len(set(n // 10 for n in s)) < d_min:
+        if not allow_relax and len(set(n // 10 for n in s)) < d_min:
             return False
-        if not (s_min <= sum(s) <= s_max):
+        if not allow_relax and not (s_min <= sum(s) <= s_max):
             return False
+        # vincolo wildcard: al massimo max_wild numeri fuori pool
+        n_w = sum(1 for n in s if n in wildcards)
+        if n_w > max_wild:
+            return False
+        # categoria: serve ≥1 da ciascuna (i wildcard non contano come categoria)
         if min_cat_each > 0:
             if not any(n in ripe for n in s): return False
             if not any(n in sofi for n in s): return False
@@ -451,34 +519,102 @@ def generate_sestine(pool, probs, n_sestine=3,
         return True
 
     results = []
-    for combo in combinations(top_pool, 6):
+    for combo in combinations(candidates, 6):
         s = sorted(combo)
         if _valid(s):
             results.append((sum(probs.get(n, 0) for n in s), s))
-
     results.sort(reverse=True)
 
-    # Fallback 1: relax sum/decades, keep category constraint
+    # Fallback 1: relax sum/decades, keep category + wildcard cap
     if not results:
-        for combo in combinations(top_pool, 6):
+        for combo in combinations(candidates, 6):
             s = sorted(combo)
-            if s[5] - s[0] < r_min: continue
-            if min_cat_each > 0:
-                if not any(n in ripe for n in s): continue
-                if not any(n in sofi for n in s): continue
-                if not any(n in cop  for n in s): continue
-            results.append((sum(probs.get(n, 0) for n in s), s))
+            if _valid(s, allow_relax=True):
+                results.append((sum(probs.get(n, 0) for n in s), s))
         results.sort(reverse=True)
 
-    # Fallback 2: drop category constraint if pool is unbalanced
+    # Fallback 2: drop everything but range
     if not results:
-        for combo in combinations(top_pool, 6):
+        for combo in combinations(candidates, 6):
             s = sorted(combo)
             if s[5] - s[0] < 20: continue
+            if sum(1 for n in s if n in wildcards) > max_wild: continue
             results.append((sum(probs.get(n, 0) for n in s), s))
         results.sort(reverse=True)
 
     return results[:n_sestine]
+
+
+# ── STUDIO DATI: tetto-pool + efficacia wildcard ──────────────────────────────
+@st.cache_data(show_spinner="Studio dati — backtest tetto-pool…")
+def compute_ceiling_study(df_hash, _df, n_wild, window=CEILING_WINDOW):
+    """Backtest walk-forward: misura quanto spesso il pool è il vero collo di
+    bottiglia e se i wildcard avrebbero recuperato numeri fuori pool.
+
+    Per ogni draw: ceiling = quanti numeri vincenti erano nel pool (max teorico
+    catturabile dalla strategia 2+2+2+2). Studia anche da quali decine arrivano
+    i numeri fuori pool e quanti wildcard avrebbero colpito.
+    """
+    df    = _df
+    total = len(df)
+    start = max(WARMUP, total - window)
+
+    ceilings       = []          # numeri vincenti nel pool, per draw
+    out_decade     = {d[0]: 0 for d in DECADES}   # da dove vengono i fuori-pool
+    out_total      = 0
+    wild_injected  = 0
+    wild_hits      = 0
+    draws_gained   = 0           # draw in cui il wildcard ha colpito ≥1
+    regime_shifts  = 0           # draw con ceiling ≤ 2
+    per_draw       = []
+
+    for i in range(start, total):
+        actual   = set(get_nums(df.iloc[i]))
+        pool     = build_pool_at(df, i - 1)
+        in_pool  = actual & pool["pool_all"]
+        out_pool = actual - pool["pool_all"]
+        ceiling  = len(in_pool)
+        ceilings.append(ceiling)
+        if ceiling <= 2:
+            regime_shifts += 1
+
+        for n in out_pool:
+            out_total += 1
+            for dname, dset in DECADES:
+                if n in dset:
+                    out_decade[dname] += 1
+                    break
+
+        wild = build_wildcards(df, i, pool, n_wild=n_wild)
+        wild_injected += len(wild)
+        wh = len(set(wild) & actual)
+        wild_hits += wh
+        if wh > 0:
+            draws_gained += 1
+
+        per_draw.append({
+            "draw":     int(df.iloc[i]["draw"]),
+            "ceiling":  ceiling,
+            "out":      6 - ceiling,
+            "wildcards": sorted(wild),
+            "wild_hit": wh,
+        })
+
+    n = len(ceilings)
+    summary = {
+        "n_draws":       n,
+        "avg_ceiling":   float(np.mean(ceilings)) if ceilings else 0.0,
+        "regime_pct":    regime_shifts / n if n else 0.0,
+        "out_total":     out_total,
+        "out_decade":    out_decade,
+        "wild_injected": wild_injected,
+        "wild_hits":     wild_hits,
+        "wild_precision": wild_hits / wild_injected if wild_injected else 0.0,
+        "draws_gained":  draws_gained,
+        "draws_gained_pct": draws_gained / n if n else 0.0,
+        "ceiling_dist":  {k: int(np.sum(np.array(ceilings) == k)) for k in range(7)},
+    }
+    return summary, per_draw
 
 
 # ── HTML HELPERS ──────────────────────────────────────────────────────────────
@@ -495,11 +631,14 @@ def pool_html(pool):
     return "".join(parts)
 
 
-def sestina_html(nums, pool=None, actual=None):
+def sestina_html(nums, pool=None, actual=None, wildcards=None):
+    wildcards = set(wildcards or [])
     parts = []
     for n in sorted(nums):
         if actual and n in actual:
             css = "hit"
+        elif n in wildcards:
+            css = "wild"
         elif pool:
             if   n in pool.get("ripetuti", set()):  css = "ripe"
             elif n in pool.get("soffi_1",  set()):  css = "sofi1"
@@ -542,10 +681,19 @@ pos_means, pos_stds, pos_errors, pos_boost = compute_positional_analysis(df_hash
 clf, scaler   = train_meta_learner(df_hash, df, num_bias, pos_boost, dyn_weights)
 
 next_probs, next_pool = predict_next_draw(df, clf, scaler, dyn_weights, num_bias, pos_boost)
-top_sestine           = generate_sestine(next_pool, next_probs)
 
-# ── DEBUG SIDEBAR ─────────────────────────────────────────────────────────────
+# ── SIDEBAR: debug + controlli wildcard ───────────────────────────────────────
 with st.sidebar:
+    st.markdown("### 🃏 Modalità Wildcard")
+    st.caption(
+        "Inietta numeri fuori pool dalla decina più sottostimata (Strato 2). "
+        "Utile nei *regime shift* (es. cluster basso 3-4-5 dopo una draw senza numeri bassi)."
+    )
+    wild_on = st.toggle("Wildcard attiva", value=False)
+    n_wild  = st.slider("Numeri wildcard", 0, 3, 2, disabled=not wild_on)
+    max_wild_in_sestina = st.slider("Max wildcard per sestina", 0, 2, 1,
+                                    disabled=not wild_on)
+    st.markdown("---")
     st.markdown("### 🔧 Debug CSV")
     last_row  = df.iloc[-1]
     last_nums = get_nums(last_row)
@@ -558,12 +706,21 @@ with st.sidebar:
     if any(n < 1 or n > 49 for n in last_nums):
         st.error("⚠️ Numeri fuori range 1-49 — controlla il mapping delle colonne!")
 
+# wildcards per la prossima draw (ref_idx = len(df) → studia tutto lo storico)
+next_wild = build_wildcards(df, len(df), next_pool, n_wild=n_wild) if wild_on else []
+top_sestine = generate_sestine(
+    next_pool, next_probs,
+    wildcards=next_wild,
+    max_wild=max_wild_in_sestina if wild_on else 0,
+)
+
 # ── TABS ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Precision Storica",
     "🎯 Errori per Decina",
     "⚗️ Segnale Corretto",
     "🔍 Verifica Storica",
+    "🔬 Studio Dati",
 ])
 
 CAT_COLORS = {
@@ -750,6 +907,14 @@ with tab3:
         f"Coperti±2-4: {len(next_pool['soffi_24'])} | "
         f"Totale: {len(next_pool['pool_all'])}"
     )
+    if wild_on and next_wild:
+        st.markdown(
+            "**🃏 Wildcard (fuori pool, decina sottostimata):** "
+            + "".join(ball_html(n, "wild") for n in next_wild),
+            unsafe_allow_html=True,
+        )
+        wdec = {next(dn for dn, ds in DECADES if n in ds) for n in next_wild}
+        st.caption(f"Iniettati da: {', '.join(sorted(wdec))} — max {max_wild_in_sestina}/sestina")
     st.markdown("---")
 
     if not top_sestine:
@@ -762,13 +927,17 @@ with tab3:
             dec  = len(set(n // 10 for n in sestina))
 
             st.markdown(f"### #{rank}  —  Score ML: {score:.4f}")
-            st.markdown(sestina_html(sestina, pool=next_pool), unsafe_allow_html=True)
+            st.markdown(sestina_html(sestina, pool=next_pool, wildcards=next_wild),
+                        unsafe_allow_html=True)
 
             details = []
             for n in sorted(sestina):
-                cat = ("Ripetuto"     if n in next_pool["ripetuti"]  else
-                       "Soffio±1"    if n in next_pool["soffi_1"]   else
-                       "Coperto±2-4" if n in next_pool["soffi_24"]  else "—")
+                if n in next_wild:
+                    cat = "🃏 Wildcard"
+                else:
+                    cat = ("Ripetuto"     if n in next_pool["ripetuti"]  else
+                           "Soffio±1"    if n in next_pool["soffi_1"]   else
+                           "Coperto±2-4" if n in next_pool["soffi_24"]  else "—")
                 p   = next_probs.get(n, 0)
                 b   = num_bias.get(n, 0)
                 tag = "▲ premiato" if b < -0.2 else ("▼ penalizzato" if b > 0.2 else "≈ neutro")
@@ -923,3 +1092,124 @@ with tab4:
                 "Uscito":    "✅" if n in sel_act else "—",
             })
         st.dataframe(pd.DataFrame(prows), use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — STUDIO DATI (tetto-pool + efficacia wildcard)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("🔬 Studio Dati — Quanto il pool è il vero collo di bottiglia?")
+    st.caption(
+        f"Backtest walk-forward sugli ultimi {CEILING_WINDOW} draw. "
+        "Il 'tetto' è quanti numeri vincenti erano nel pool: nessuna sestina può "
+        "superarlo. Studia anche se i wildcard avrebbero recuperato i fuori-pool."
+    )
+
+    study_nwild = st.slider("Wildcard da testare nel backtest", 0, 3, 2, key="study_nw")
+    summary, per_draw = compute_ceiling_study(df_hash, df, study_nwild)
+
+    # KPI row
+    c = st.columns(4)
+    with c[0]:
+        st.markdown(kpi_card(f"{summary['avg_ceiling']:.2f}", "Tetto medio /6",
+                             "numeri vincenti nel pool"), unsafe_allow_html=True)
+    with c[1]:
+        st.markdown(kpi_card(f"{summary['regime_pct']:.1%}", "Regime shift",
+                             "draw con ≤2 nel pool"), unsafe_allow_html=True)
+    with c[2]:
+        st.markdown(kpi_card(f"{summary['out_total']}", "Numeri fuori pool",
+                             f"su {summary['n_draws']} draw"), unsafe_allow_html=True)
+    with c[3]:
+        st.markdown(kpi_card(f"{summary['draws_gained_pct']:.1%}", "Draw migliorati",
+                             "wildcard ha colpito ≥1"), unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### Distribuzione del tetto-pool")
+    st.caption(
+        "Quante volte la strategia 2+2+2+2 avrebbe potuto catturare 0,1,2…6 numeri. "
+        "La massa a sinistra = quante volte il pool stesso era il limite."
+    )
+    dist = summary["ceiling_dist"]
+    fig_c = go.Figure(go.Bar(
+        x=[f"{k}/6" for k in range(7)],
+        y=[dist.get(k, 0) for k in range(7)],
+        marker_color=["#e74c3c", "#e67e22", "#f0a500",
+                      "#2ecc71", "#27ae60", "#1e8449", "#145a32"],
+        text=[dist.get(k, 0) for k in range(7)], textposition="outside",
+    ))
+    fig_c.update_layout(
+        template="plotly_dark", height=320,
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117",
+        xaxis_title="Numeri vincenti nel pool", yaxis_title="N. draw",
+        margin=dict(t=30),
+    )
+    st.plotly_chart(fig_c, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### Da quali decine arrivano i numeri FUORI pool?")
+    st.caption(
+        "Se una decina domina, è lì che la strategia perde sistematicamente — "
+        "ed è esattamente da lì che i wildcard pescano (es. D1 1-10)."
+    )
+    od = summary["out_decade"]
+    dnames = [d[0] for d in DECADES]
+    fig_od = go.Figure(go.Bar(
+        x=dnames, y=[od[d] for d in dnames],
+        marker_color="#9b59b6",
+        text=[od[d] for d in dnames], textposition="outside",
+    ))
+    fig_od.update_layout(
+        template="plotly_dark", height=300,
+        paper_bgcolor="#0a0e17", plot_bgcolor="#0d1117",
+        yaxis_title="Numeri fuori pool", margin=dict(t=30),
+    )
+    st.plotly_chart(fig_od, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### Verdetto wildcard — i dati decidono")
+    if study_nwild == 0:
+        st.info("Imposta wildcard > 0 per testarne l'efficacia.")
+    else:
+        wp   = summary["wild_precision"]
+        wi   = summary["wild_injected"]
+        wh   = summary["wild_hits"]
+        base = 6.0 / 49.0   # baseline: precision di un numero a caso
+        cc = st.columns(3)
+        with cc[0]:
+            st.markdown(kpi_card(f"{wp:.1%}", "Precision wildcard",
+                                 f"{wh} hit / {wi} iniettati"), unsafe_allow_html=True)
+        with cc[1]:
+            st.markdown(kpi_card(f"{base:.1%}", "Baseline casuale",
+                                 "6/49 numero a caso"), unsafe_allow_html=True)
+        with cc[2]:
+            lift = (wp / base) if base else 0
+            st.markdown(kpi_card(f"{lift:.2f}×", "Lift vs casuale",
+                                 "↑ meglio del caso" if lift > 1 else "↓ peggio del caso"),
+                        unsafe_allow_html=True)
+
+        if wp > base * 1.15:
+            st.success(
+                f"✅ I dati supportano la wildcard: precision {wp:.1%} contro "
+                f"{base:.1%} casuale ({lift:.2f}×). Conviene attivarla nei regime shift."
+            )
+        elif wp > base:
+            st.info(
+                f"↔️ Wildcard leggermente meglio del caso ({wp:.1%} vs {base:.1%}). "
+                "Marginale — utile solo come azzardo occasionale."
+            )
+        else:
+            st.warning(
+                f"⚠️ I dati NON supportano la wildcard: precision {wp:.1%} ≤ "
+                f"{base:.1%} casuale. Meglio restare nel pool. "
+                "Il regime shift resta intrinsecamente imprevedibile."
+            )
+
+    st.markdown("---")
+    with st.expander("Dettaglio per-draw (tetto + wildcard)"):
+        pdf = pd.DataFrame(per_draw)
+        pdf["wildcards"] = pdf["wildcards"].apply(lambda xs: " ".join(f"{n:02d}" for n in xs))
+        pdf = pdf.rename(columns={
+            "draw": "Draw", "ceiling": "Nel pool", "out": "Fuori",
+            "wildcards": "Wildcard", "wild_hit": "Wild hit",
+        })
+        st.dataframe(pdf.iloc[::-1], use_container_width=True, hide_index=True)
