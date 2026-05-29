@@ -42,34 +42,52 @@ def main() -> int:
     print("Magic Dream Setup")
     print("=" * 60)
     print(f"Cartella Magic Dream: {ROOT_DIR}")
-    print(f"Destinazione dashboard: {DASHBOARD_DIR}")
 
+    # 1. Crea cartelle necessarie
     DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+    magic_lab_dir = ROOT_DIR / "magic_lab"
+    magic_lab_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Cartella magic_lab pronta: {magic_lab_dir}")
 
+    # 2. Deploy App3 Magic Dream (sempre, indipendente dal lotto)
+    app3_src = ROOT_DIR / "magic_dream_app3.py"
+    app3_lifecycle_dir = ROOT_DIR / "app3-lifecycle"
+    app3_dst = app3_lifecycle_dir / "app3.py"
+    app3_lifecycle_dir.mkdir(parents=True, exist_ok=True)
+    if app3_src.exists():
+        try:
+            shutil.copy2(str(app3_src), str(app3_dst))
+            print(f"App3 installata: {app3_dst}")
+        except Exception as e:
+            print(f"ERRORE copia App3: {e}")
+    else:
+        print(f"ATTENZIONE: {app3_src} non trovata — App3 non aggiornata")
+
+    # 3. Copia file lotto (non bloccante se non trovati)
     lotto_dir = find_lotto_dir()
     if lotto_dir is None:
-        print("\nERRORE: cartella lotto non trovata.")
-        print("Cercate in:")
+        print("\nATTENZIONE: cartella lotto non trovata (App1/App2 potrebbero non funzionare).")
+        print("Cercato in:")
         for p in LOTTO_CANDIDATES:
             print(f"  {p}")
-        print("\nCopia manualmente i file backtest_ml_storico.xlsx e lotto_draws.csv")
+        print(f"Copia manualmente backtest_ml_storico.xlsx e lotto_draws.csv")
         print(f"dentro: {DASHBOARD_DIR}")
-        return 1
+        print("\n" + "=" * 60)
+        print("SETUP COMPLETATO (App3 pronta, lotto non trovato).")
+        print("=" * 60)
+        return 0
 
     print(f"\nCartella lotto trovata: {lotto_dir}")
-
     copied, skipped, missing = [], [], []
     for fname in FILES_NEEDED:
         src = lotto_dir / fname
         dst = DASHBOARD_DIR / fname
         if not src.exists():
-            print(f"  MANCANTE: {fname} non trovato in {lotto_dir}")
+            print(f"  MANCANTE: {fname}")
             missing.append(fname)
             continue
         if dst.exists():
-            src_mtime = src.stat().st_mtime
-            dst_mtime = dst.stat().st_mtime
-            if src_mtime <= dst_mtime:
+            if src.stat().st_mtime <= dst.stat().st_mtime:
                 print(f"  OK (aggiornato): {fname}")
                 skipped.append(fname)
                 continue
@@ -79,35 +97,10 @@ def main() -> int:
             copied.append(fname)
         except Exception as e:
             print(f"  ERRORE copia {fname}: {e}")
-            return 1
-
-    # Crea cartella magic_lab se non esiste
-    magic_lab_dir = ROOT_DIR / "magic_lab"
-    magic_lab_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nCartella magic_lab pronta: {magic_lab_dir}")
-
-    # Deploy Magic Dream App3 (correct version) to app3-lifecycle/app3.py
-    app3_src = ROOT_DIR / "magic_dream_app3.py"
-    app3_lifecycle_dir = ROOT_DIR / "app3-lifecycle"
-    app3_dst = app3_lifecycle_dir / "app3.py"
-    app3_lifecycle_dir.mkdir(parents=True, exist_ok=True)
-    if app3_src.exists():
-        try:
-            shutil.copy2(str(app3_src), str(app3_dst))
-            print(f"\nApp3 Magic Dream installata: {app3_dst}")
-        except Exception as e:
-            print(f"\nERRORE copia App3: {e}")
-    else:
-        print(f"\nATTENZIONE: {app3_src} non trovata — App3 non aggiornata")
 
     print("\n" + "=" * 60)
-    if missing and len(missing) == len(FILES_NEEDED):
-        print("SETUP INCOMPLETO — file sorgente mancanti nel lotto folder.")
-        return 1
-
     if missing:
-        print(f"Attenzione: {missing} non trovati (non critici se backtest c'e')")
-
+        print(f"Attenzione: {missing} non trovati")
     print("SETUP COMPLETATO.")
     print(f"  Copiati: {copied}")
     print(f"  Gia' aggiornati: {skipped}")
