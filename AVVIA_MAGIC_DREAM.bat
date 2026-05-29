@@ -17,6 +17,10 @@ echo Setup...
 python setup_magic_dream.py
 echo.
 
+echo Installo dipendenze agente...
+pip install anthropic -q
+echo.
+
 echo Avvio agente AI...
 if exist agente_desktop.py (
     start "Agente Magic Dream" cmd /c "python agente_desktop.py & pause"
