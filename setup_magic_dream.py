@@ -86,6 +86,20 @@ def main() -> int:
     magic_lab_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nCartella magic_lab pronta: {magic_lab_dir}")
 
+    # Deploy Magic Dream App3 (correct version) to app3-lifecycle/app3.py
+    app3_src = ROOT_DIR / "magic_dream_app3.py"
+    app3_lifecycle_dir = ROOT_DIR / "app3-lifecycle"
+    app3_dst = app3_lifecycle_dir / "app3.py"
+    app3_lifecycle_dir.mkdir(parents=True, exist_ok=True)
+    if app3_src.exists():
+        try:
+            shutil.copy2(str(app3_src), str(app3_dst))
+            print(f"\nApp3 Magic Dream installata: {app3_dst}")
+        except Exception as e:
+            print(f"\nERRORE copia App3: {e}")
+    else:
+        print(f"\nATTENZIONE: {app3_src} non trovata — App3 non aggiornata")
+
     print("\n" + "=" * 60)
     if missing and len(missing) == len(FILES_NEEDED):
         print("SETUP INCOMPLETO — file sorgente mancanti nel lotto folder.")
