@@ -7,21 +7,16 @@ echo  Magic Dream - Avvio
 echo ============================================================
 echo.
 
-REM Setup automatico: copia backtest e CSV dalla cartella lotto
-echo [1/2] Setup file...
+echo [1/3] Setup file...
 python setup_magic_dream.py
-if errorlevel 1 (
-    echo.
-    echo ATTENZIONE: setup non completato.
-    echo Copia manualmente backtest_ml_storico.xlsx e lotto_draws.csv
-    echo dentro: app1-app2-dashboard\lotto-dashboard\
-    echo.
-    pause
-    exit /b 1
-)
-
 echo.
-echo [2/2] Avvio supervisor 24/7...
+
+echo [2/3] Avvio agente AI (porta 8604)...
+start "Agente Magic Dream" /B python -m streamlit run agente_magic.py --server.port 8604 --server.headless true
+echo  Agente  -^> http://localhost:8604
+echo.
+
+echo [3/3] Avvio supervisor 24/7...
 echo  App 1  -^> http://localhost:8601
 echo  App 2  -^> http://localhost:8602
 echo  App 3  -^> http://localhost:8603
