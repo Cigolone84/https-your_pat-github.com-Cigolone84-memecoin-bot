@@ -17,6 +17,15 @@ import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+
+# Auto-installa anthropic se mancante
+try:
+    import anthropic as _anthropic_check  # noqa: F401
+except ImportError:
+    print("Installo libreria anthropic...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic"])
+    print("anthropic installata.")
+
 from tkinter import font as tkfont
 import tkinter as tk
 from tkinter import scrolledtext, simpledialog, ttk
@@ -241,11 +250,7 @@ def execute_tool(name: str, inp: dict) -> str:
 
 def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
     """Returns (reply_text, updated_history)."""
-    try:
-        import anthropic
-    except ImportError:
-        return "Installa la libreria anthropic: pip install anthropic", history
-
+    import anthropic
     client = anthropic.Anthropic(api_key=api_key)
     messages = history + [{"role": "user", "content": message}]
 
