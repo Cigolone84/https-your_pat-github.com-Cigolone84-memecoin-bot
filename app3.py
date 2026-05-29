@@ -478,7 +478,7 @@ tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 0 — RIEPILOGO                                                     ║
+# ║  TAB 0 — RIEPILOGO VISUALE                                             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 with tab0:
@@ -499,13 +499,14 @@ with tab0:
     gap4_now  = int(last_draw - ev4[-1])  if len(ev4)  else 999
     gap5p_now = int(last_draw - ev5p[-1]) if len(ev5p) else 999
 
+    # "mancano" = quanto manca alla mediana storica (negativo = siamo già oltre)
     mancano3  = max(0, int(med3)  - gap3_now)
     mancano4  = max(0, int(med4)  - gap4_now)
     mancano5p = max(0, int(med5p) - gap5p_now)
 
     pct3 = float((gaps3 <= gap3_now).mean() * 100) if len(gaps3) else 0
 
-    # ── Titolo ────────────────────────────────────────────────────────────────
+    # ── Titolo ───────────────────────────────────────────────────────────────
     st.markdown(
         f"<h2 style='margin-bottom:4px'>🎯 Prossima finestra — Draw #{next_draw}</h2>"
         f"<p style='color:#8ba0b8;margin-top:0'>Ultima estrazione: <b>#{last_draw}</b> · "
@@ -514,94 +515,105 @@ with tab0:
     )
     st.divider()
 
-    # ── 3 CARD ────────────────────────────────────────────────────────────────
-    def _card(col, emoji, title, gap_now, mancano, med, avg):
+    # ── 3 CARD EVENTO ────────────────────────────────────────────────────────
+    def card_evento(title, emoji, gap_now, mancano, med, avg, draws_window,
+                    pct_now=None, col=None):
         if mancano == 0:
-            bg, border = "#0d2a0d", "#2e7d32"
-            stato = "🟢 SEI IN FINESTRA"
-            big, bigcol = "ORA", "#4caf50"
-            msg = (f"Sei oltre la mediana storica ({int(med)} draw).<br>"
-                   f"Hai <b>3 estrazioni</b> per coglierlo (T+1 T+2 T+3).")
+            bg     = "#0d2a0d"; border = "#2e7d32"; stato = "🟢 SEI IN FINESTRA"
+            msg    = f"Sei già oltre la mediana storica ({int(med)} draw).<br>Hai <b>{draws_window} estrazioni</b> per coglierlo."
+            big    = "ORA"
+            bigcol = "#4caf50"
         else:
-            bg, border = "#1e2a3a", "#2d4060"
-            stato = f"⏳ Mancano ~{mancano} draw"
-            big, bigcol = f"~{mancano}", "#5ea8f5"
-            msg = (f"Finestra attesa intorno a draw <b>#{next_draw + mancano}</b>.<br>"
-                   f"Poi hai <b>3 estrazioni</b> per coglierlo.<br>"
-                   f"Storico: ogni <b>{avg:.0f}</b> draw in media · mediana <b>{int(med)}</b>.")
+            pct_col = "#f9a825" if (pct_now or 0) < 60 else "#c62828"
+            bg      = "#1e2a3a"; border = "#2d4060"; stato = f"⏳ Mancano circa {mancano} draw"
+            msg     = (f"Evento atteso intorno alla draw <b>#{next_draw + mancano}</b>.<br>"
+                       f"Poi avrai <b>{draws_window} estrazioni</b> per coglierlo.<br>"
+                       f"Media storica: ogni <b>{avg:.0f}</b> draw · mediana <b>{int(med)}</b>.")
+            big     = f"~{mancano}"
+            bigcol  = "#5ea8f5"
+
         col.markdown(
             f'<div style="background:{bg};border:2px solid {border};border-radius:14px;'
-            f'padding:20px 16px;min-height:190px">'
-            f'<div style="font-size:.95rem;font-weight:700;color:#e8f0fe">{emoji} {title}</div>'
-            f'<div style="font-size:3rem;font-weight:900;color:{bigcol};margin:10px 0 2px;line-height:1">{big}</div>'
-            f'<div style="font-size:.82rem;font-weight:600;color:{border};margin-bottom:8px">{stato}</div>'
-            f'<div style="font-size:.78rem;color:#aaa;line-height:1.55">{msg}</div>'
-            f'<div style="font-size:.7rem;color:#555;margin-top:10px">Gap attuale: {gap_now} draw</div>'
+            f'padding:20px 18px;height:100%">'
+            f'<div style="font-size:1rem;font-weight:700;color:#e8f0fe">{emoji} {title}</div>'
+            f'<div style="font-size:3rem;font-weight:900;color:{bigcol};margin:10px 0 4px">{big}</div>'
+            f'<div style="font-size:0.85rem;font-weight:600;color:{border};margin-bottom:8px">{stato}</div>'
+            f'<div style="font-size:0.8rem;color:#aaa;line-height:1.5">{msg}</div>'
+            f'<div style="font-size:0.75rem;color:#666;margin-top:10px">Gap attuale: {gap_now} draw</div>'
             f'</div>',
             unsafe_allow_html=True
         )
 
     c1, c2, c3 = st.columns(3)
-    _card(c1, "🎯", "Sestina prende 3+ numeri", gap3_now,  mancano3,  med3,  avg3)
-    _card(c2, "⭐", "Sestina prende 4+ numeri", gap4_now,  mancano4,  med4,  avg4)
-    _card(c3, "🔥", "Pool contiene 5+ numeri",  gap5p_now, mancano5p, med5p, avg5p)
+    card_evento("Sestina prende 3+ numeri", "🎯", gap3_now,  mancano3,  med3,  avg3,  3, pct3,  c1)
+    card_evento("Sestina prende 4+ numeri", "⭐", gap4_now,  mancano4,  med4,  avg4,  3, None, c2)
+    card_evento("Pool contiene 5+ numeri",  "🔥", gap5p_now, mancano5p, med5p, avg5p, 3, None, c3)
 
     st.divider()
 
     # ── Spiegazione ───────────────────────────────────────────────────────────
     st.markdown(
         '<div class="card-box" style="border-left:4px solid #5ea8f5;padding:14px 20px">'
-        '<b>💡 Come leggere:</b> ogni card dice <b>quante draw mancano</b> prima che l\'evento '
-        'diventi probabile (basato sulla storia). Quando diventa '
-        '<span style="color:#4caf50"><b>ORA</b></span> sei in finestra: '
-        'la previsione resta valida per <b>3 estrazioni consecutive</b>. Non cambiare nulla — aspetta e monitora.'
+        '<b>💡 Come leggere queste card:</b><br>'
+        'Ogni card dice <b>quante draw mancano</b> prima che l\'evento diventi probabile (secondo la storia). '
+        'Quando il numero diventa <span style="color:#4caf50"><b>ORA</b></span>, '
+        'sei già in finestra: la stessa previsione resta valida per <b>3 estrazioni consecutive</b> (T+1, T+2, T+3). '
+        'Non devi cambiare nulla — aspetta e monitora.'
         '</div>',
         unsafe_allow_html=True
     )
 
     st.divider()
 
-    # ── Timeline gap sestina ≥3 ────────────────────────────────────────────────
-    st.markdown("#### 📊 Storico gap tra eventi sestina ≥3")
-    st.caption("Ogni barra = draw passate tra un evento e il successivo. Verde = rapido, rosso = lungo.")
+    # ── Timeline ultimi eventi ─────────────────────────────────────────────────
+    st.markdown("#### 📊 Storico recente — gap tra eventi sestina ≥3")
+    st.caption("Ogni barra = draw passate tra un evento e il successivo. Verde = evento rapido, rosso = ha aspettato.")
+
     if len(ev3) >= 3:
-        show_n  = min(15, len(gaps3))
-        g_show  = gaps3[-show_n:]
-        e_show  = ev3[-show_n:]
-        c_bars  = ["#4caf50" if g <= med3 * 0.8 else "#ff9800" if g <= med3 * 1.5 else "#f44336"
-                   for g in g_show]
-        fig_tl  = go.Figure(go.Bar(
-            x=[f"#{d}" for d in e_show], y=g_show,
-            marker_color=c_bars,
-            text=[str(int(g)) for g in g_show], textposition="outside",
+        show_n = min(15, len(gaps3))
+        g_show = gaps3[-show_n:]
+        e_show = ev3[-(show_n):]
+        colors_tl = [
+            "#4caf50" if g <= med3 * 0.8 else
+            "#ff9800" if g <= med3 * 1.5 else
+            "#f44336"
+            for g in g_show
+        ]
+        fig_tl = go.Figure(go.Bar(
+            x=[f"#{d}" for d in e_show],
+            y=g_show,
+            marker_color=colors_tl,
+            text=[str(int(g)) for g in g_show],
+            textposition="outside",
         ))
         fig_tl.add_hline(y=med3, line_dash="dot", line_color="#ffd54f",
                          annotation_text=f"mediana {int(med3)} draw",
                          annotation_position="top right")
         fig_tl.add_annotation(
-            xref="paper", yref="paper", x=1.0, y=-0.22,
+            xref="paper", yref="paper", x=1.0, y=-0.18,
             text=f"Gap attuale: <b>{gap3_now} draw</b> dall'ultimo evento (#{ev3[-1]})",
             showarrow=False, font=dict(color="#5ea8f5", size=12), xanchor="right",
         )
         fig_tl.update_layout(
-            height=300, margin=dict(l=10, r=20, t=30, b=70),
+            height=300, margin=dict(l=10, r=20, t=30, b=60),
             plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
             font=dict(color="#c0cfe0", size=11),
             yaxis=dict(title="Draw tra eventi", gridcolor="#1e2a3a"),
-            xaxis=dict(tickangle=-35), showlegend=False,
+            xaxis=dict(tickangle=-35),
+            showlegend=False,
         )
         st.plotly_chart(fig_tl, use_container_width=True)
-        st.caption("🟢 breve  🟠 nella norma  🔴 lungo")
+        st.caption("🟢 breve (≤80% mediana)  🟠 nella norma  🔴 lungo (>150% mediana)")
 
     st.divider()
 
-    # ── Numeri da monitorare ───────────────────────────────────────────────────
-    st.markdown(f"#### 🧭 Numeri da monitorare — Draw #{next_draw} fino a #{next_draw+3}")
-    cn1, cn2 = st.columns(2)
+    # ── Numeri ora ────────────────────────────────────────────────────────────
+    st.markdown(f"#### 🧭 Numeri da monitorare per Draw #{next_draw}–#{next_draw+3}")
+    cn1, cn2 = st.columns([1, 1])
     with cn1:
         if core_4plus:
             st.markdown(
-                '<span style="color:#f48fb1;font-size:.8rem">🔴 NUCLEO — in 4-5 sestine</span><br>'
+                '<span style="color:#f48fb1;font-size:.8rem">🔴 NUCLEO — in 4-5 sestine (più forti)</span><br>'
                 + balls_html(core_4plus, "nb-nucleo"), unsafe_allow_html=True)
         if core_3:
             st.markdown(
@@ -612,7 +624,7 @@ with tab0:
             '<span style="color:#80deea;font-size:.8rem">🔵 ML TOP-8</span><br>'
             + balls_html(top8_last, "nb-pool"), unsafe_allow_html=True)
     st.caption(
-        f"La previsione non cambia per le prossime 3 estrazioni — "
+        "⚠️ La previsione non cambia per le prossime 3 estrazioni — "
         f"monitora su **#{next_draw}**, **#{next_draw+1}**, **#{next_draw+2}**, **#{next_draw+3}**."
     )
 
