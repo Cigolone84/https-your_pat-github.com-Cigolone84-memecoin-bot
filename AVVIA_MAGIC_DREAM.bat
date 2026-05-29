@@ -18,13 +18,18 @@ python setup_magic_dream.py
 echo.
 
 echo Avvio agente AI...
-start "Agente Magic Dream" pythonw agente_desktop.py
+if exist agente_desktop.py (
+    start "Agente Magic Dream" cmd /c "python agente_desktop.py & pause"
+    echo Agente avviato.
+) else (
+    echo ATTENZIONE: agente_desktop.py non trovato
+)
 echo.
 
 echo Avvio Magic Dream 24/7...
-echo  App 1 -^> http://localhost:8601
-echo  App 2 -^> http://localhost:8602
-echo  App 3 -^> http://localhost:8603
+echo  App 1 -> http://localhost:8601
+echo  App 2 -> http://localhost:8602
+echo  App 3 -> http://localhost:8603
 echo.
 python magic_dream_24_7.py
 pause
