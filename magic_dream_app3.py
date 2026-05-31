@@ -1,1927 +1,341 @@
 """
-App3 — Lifecycle Previsioni & Copertura verso il 6
+magic_dream_app3.py -- Magic Dream App3
+Dashboard principale: Strategie, Previsioni, Semaforo, Stato.
+Non richiede backtest per avviarsi.
 """
-import os
-from math import comb
-from collections import Counter
+
+import time
+import urllib.request
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-APP_DIR = Path(__file__).resolve().parent
-MAGIC_DREAM_DIR = APP_DIR.parent
-DASHBOARD_DIR = MAGIC_DREAM_DIR / "app1-app2-dashboard" / "lotto-dashboard"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+APP_DIR        = Path(__file__).resolve().parent
+ROOT_DIR       = APP_DIR.parent
+MAGIC_LAB_DIR  = ROOT_DIR / "magic_lab"
+DASHBOARD_DIR  = ROOT_DIR / "app1-app2-dashboard" / "lotto-dashboard"
+BACKTEST_PATH  = DASHBOARD_DIR / "backtest_ml_storico.xlsx"
+LOG_PATH       = ROOT_DIR / "magic_dream_24_7.log"
 
-BACKTEST_PATH = DASHBOARD_DIR / "backtest_ml_storico.xlsx"
-APP2_SUMMARY_PATH = DASHBOARD_DIR / "app2_strategy_summary.csv"
-MAGIC_LAB_DIR = MAGIC_DREAM_DIR / "magic_lab"
-MAGIC_LAB_RANKING_PATH = MAGIC_LAB_DIR / "latest_strategy_ranking.csv"
-MAGIC_LAB_NEXT_PATH = MAGIC_LAB_DIR / "latest_next_predictions.csv"
-MAGIC_LAB_CYCLE_SUMMARY_PATH = MAGIC_LAB_DIR / "latest_cycle_summary.csv"
-MAGIC_LAB_CYCLE_WINDOWS_PATH = MAGIC_LAB_DIR / "latest_cycle_windows.csv"
-MAGIC_LAB_EVENT_GAPS_PATH = MAGIC_LAB_DIR / "latest_event_gaps.csv"
-MAGIC_LAB_RANGE_POSITIONS_PATH = MAGIC_LAB_DIR / "latest_range_positions.csv"
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+LAB_RANKING  = MAGIC_LAB_DIR / "latest_strategy_ranking.csv"
+LAB_NEXT     = MAGIC_LAB_DIR / "latest_next_predictions.csv"
+LAB_GAPS     = MAGIC_LAB_DIR / "latest_event_gaps.csv"
+LAB_RANGE    = MAGIC_LAB_DIR / "latest_range_positions.csv"
 
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Magic Dream — Centro Operativo",
+    page_title="Magic Dream",
     layout="wide",
     page_icon="🎯",
     initial_sidebar_state="expanded",
 )
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Sfondo sidebar più scuro */
-[data-testid="stSidebar"] { background: #1a1a2e; }
-[data-testid="stSidebar"] * { color: #e0e0e0 !important; }
+[data-testid="stSidebar"] { background: #111827; }
+[data-testid="stSidebar"] * { color: #e5e7eb !important; }
 
-/* Card metriche */
-div[data-testid="metric-container"] {
-    background: #1e2a3a;
-    border: 1px solid #2d4060;
-    border-radius: 8px;
-    padding: 10px 14px;
-}
-div[data-testid="metric-container"] label { font-size: 0.78rem; color: #8ba0b8 !important; }
-div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-    font-size: 1.3rem; font-weight: 700; color: #e8f0fe !important;
-}
-
-/* Badge numero — usato con st.markdown HTML */
 .num-ball {
     display: inline-block;
-    width: 34px; height: 34px;
+    width: 40px; height: 40px;
     border-radius: 50%;
-    line-height: 34px;
+    line-height: 40px;
     text-align: center;
     font-weight: 700;
-    font-size: 0.82rem;
-    margin: 2px;
+    font-size: 0.9rem;
+    margin: 3px;
     color: #fff;
 }
-.nb-nucleo { background: #c62828; }
-.nb-forte  { background: #e65100; }
-.nb-cand   { background: #f9a825; color: #333; }
-.nb-pool   { background: #1565c0; }
-.nb-gray   { background: #555; }
+.c1 { background: #dc2626; }
+.c2 { background: #ea580c; }
+.c3 { background: #1d4ed8; }
+.c4 { background: #16a34a; }
+.c5 { background: #7c3aed; }
+.c6 { background: #0891b2; }
 
-/* Sezione card */
-.card-box {
-    background: #1e2a3a;
-    border: 1px solid #2d4060;
-    border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 12px;
-}
-.card-title {
-    font-size: 0.9rem;
-    color: #8ba0b8;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 6px;
-}
-
-/* Divider sottile */
-hr { border-color: #2d4060 !important; margin: 6px 0 !important; }
-
-/* Tab labels */
-button[data-baseweb="tab"] { font-size: 0.9rem; font-weight: 600; }
+.semaforo-verde  { color: #16a34a; font-size: 2rem; font-weight: 700; }
+.semaforo-blu    { color: #1d4ed8; font-size: 2rem; font-weight: 700; }
+.semaforo-giallo { color: #d97706; font-size: 2rem; font-weight: 700; }
+.semaforo-rosso  { color: #dc2626; font-size: 2rem; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
-def parse_nums(s) -> frozenset:
-    if pd.isna(s) or not str(s).strip():
-        return frozenset()
-    return frozenset(int(x) for x in str(s).split())
+# ── Helpers ────────────────────────────────────────────────────────────────────
+STRATEGY_COLORS = {
+    "FreqHot8":    "c1",
+    "FreqCold8":   "c2",
+    "HotCold4+4":  "c3",
+    "Decade8":     "c4",
+    "Delay8":      "c5",
+    "NucleoPool":  "c6",
+}
 
-def fmt(nums) -> str:
-    return "  ".join(f"{n:02d}" for n in sorted(nums))
+AZIONE_EMOJI = {
+    "attivare":        ("🟢", "ATTIVARE",        "semaforo-verde"),
+    "monitorare forte":("🔵", "MONITORARE FORTE","semaforo-blu"),
+    "preparare":       ("🟡", "PREPARARE",        "semaforo-giallo"),
+    "non inseguire":   ("🔴", "NON INSEGUIRE",    "semaforo-rosso"),
+    "osservare soltanto":("⚪","OSSERVARE",        "semaforo-rosso"),
+}
+AZIONE_ORDER = {"attivare": 4, "monitorare forte": 3, "preparare": 2,
+                "non inseguire": 1, "osservare soltanto": 0}
 
-def balls_html(nums, cls="nb-pool") -> str:
-    """Render a list of numbers as colored circular badges."""
-    return "".join(f'<span class="num-ball {cls}">{n:02d}</span>' for n in sorted(nums))
 
-def series_get(series: pd.Series, key, default=0):
-    """Safe .get() for a pandas Series (works with integer index)."""
+def balls_html(nums_str: str, css: str = "c1") -> str:
     try:
-        return series.loc[key]
-    except (KeyError, TypeError):
-        return default
+        nums = [int(x) for x in str(nums_str).split() if x.strip().isdigit()]
+        return "".join(f'<span class="num-ball {css}">{n:02d}</span>' for n in sorted(nums))
+    except Exception:
+        return str(nums_str)
 
-# ── Load + cache ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_bt(_mtime):
-    return pd.read_excel(BACKTEST_PATH)
+def _health(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/_stcore/health", timeout=2
+        ) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
-@st.cache_data(ttl=300, show_spinner=False)
-def build_lifecycle(_mtime):
-    df_l = pd.read_excel(BACKTEST_PATH)
-    n = len(df_l)
 
-    actuals_l = [parse_nums(df_l.iloc[i]["Numeri Reali"]) for i in range(n)]
-    top8s_l   = [parse_nums(df_l.iloc[i]["ML Top-8"])     for i in range(n)]
-    ses_l     = [[parse_nums(df_l.iloc[i][f"Sestina {k}"]) for k in range(1, 6)] for i in range(n)]
-    has_magic = all(f"Magic Sestina {k}" in df_l.columns for k in range(1, 6))
-    magic_top_l = [parse_nums(df_l.iloc[i].get("Magic Top-12", "")) for i in range(n)]
-    magic_ses_l = [
-        [parse_nums(df_l.iloc[i].get(f"Magic Sestina {k}", "")) for k in range(1, 6)]
-        for i in range(n)
-    ] if has_magic else [[frozenset() for _ in range(5)] for _ in range(n)]
-    pools_l   = [
-        top8s_l[i] | ses_l[i][0] | ses_l[i][1] | ses_l[i][2] | ses_l[i][3] | ses_l[i][4]
-        for i in range(n)
-    ]
-    magic_pools_l = [
-        magic_top_l[i] | magic_ses_l[i][0] | magic_ses_l[i][1] | magic_ses_l[i][2] | magic_ses_l[i][3] | magic_ses_l[i][4]
-        for i in range(n)
-    ]
+def lab_age() -> str:
+    if not MAGIC_LAB_DIR.exists():
+        return None
+    csvs = list(MAGIC_LAB_DIR.glob("*.csv"))
+    if not csvs:
+        return None
+    latest = max(csvs, key=lambda f: f.stat().st_mtime)
+    age = (time.time() - latest.stat().st_mtime) / 60
+    return f"{age:.0f} min fa"
 
-    records = []
-    for i in range(n):
-        pool = pools_l[i]
-        ses  = ses_l[i]
-        magic_pool = magic_pools_l[i]
-        magic_ses = magic_ses_l[i]
-        row  = df_l.iloc[i]
-        rec  = {
-            "i": i,
-            "draw": int(row["Draw"]),
-            "date": str(row["Data"])[:10],
-            "pool_size": len(pool),
-        }
-        best_pool, best_ses, best_t_pool, best_t_ses = 0, 0, 0, 0
-        best_magic_pool, best_magic_ses, best_t_magic_pool, best_t_magic_ses = 0, 0, 0, 0
-        for t in range(4):
-            j = i + t
-            if j < n:
-                actual = actuals_l[j]
-                ph = len(pool & actual)
-                sh = max(len(s & actual) for s in ses)
-                mph = len(magic_pool & actual)
-                msh = max((len(s & actual) for s in magic_ses), default=0)
-                rec[f"pool_hit_t{t}"] = ph
-                rec[f"ses_hit_t{t}"]  = sh
-                rec[f"magic_pool_hit_t{t}"] = mph
-                rec[f"magic_ses_hit_t{t}"] = msh
-                rec[f"actual_t{t}"]   = fmt(actual)
-                rec[f"draw_t{t}"]     = int(df_l.iloc[j]["Draw"])
-                if ph > best_pool: best_pool, best_t_pool = ph, t
-                if sh > best_ses:  best_ses,  best_t_ses  = sh, t
-                if mph > best_magic_pool: best_magic_pool, best_t_magic_pool = mph, t
-                if msh > best_magic_ses:  best_magic_ses,  best_t_magic_ses  = msh, t
-            else:
-                rec[f"pool_hit_t{t}"] = None
-                rec[f"ses_hit_t{t}"]  = None
-                rec[f"magic_pool_hit_t{t}"] = None
-                rec[f"magic_ses_hit_t{t}"] = None
-                rec[f"actual_t{t}"]   = None
-                rec[f"draw_t{t}"]     = None
-        rec["best_pool_hit"] = best_pool
-        rec["best_ses_hit"]  = best_ses
-        rec["best_t_pool"]   = best_t_pool
-        rec["best_t_ses"]    = best_t_ses
-        rec["best_magic_pool_hit"] = best_magic_pool
-        rec["best_magic_ses_hit"] = best_magic_ses
-        rec["best_t_magic_pool"] = best_t_magic_pool
-        rec["best_t_magic_ses"] = best_t_magic_ses
-        records.append(rec)
 
-    return pd.DataFrame(records), actuals_l, pools_l, ses_l
+@st.cache_data(ttl=60, show_spinner=False)
+def read_csv_safe(path_str: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path_str)
+    except Exception:
+        return pd.DataFrame()
 
-# Sorgente autorevole (allineata a lotto.pl) per verificare il backtest
-DRAWS_CSV_PATH = DASHBOARD_DIR / "lotto_draws.csv"
 
-@st.cache_data(ttl=300, show_spinner=False)
-def check_alignment(_bt_mtime, _csv_mtime):
-    """
-    Confronta i 'Numeri Reali' del backtest con lotto_draws.csv (verità lotto.pl).
-    Ritorna (ok, messaggi, ultime_righe_confronto).
-    """
-    if not DRAWS_CSV_PATH.exists():
-        return None, ["CSV sorgente non trovato — impossibile verificare l'allineamento."], []
-
-    bt = pd.read_excel(BACKTEST_PATH)
-    csv = pd.read_csv(DRAWS_CSV_PATH)
-
-    # Mappa draw → set di numeri dal CSV (la colonna 'draw' è affidabile)
-    csv_map = {}
-    for _, r in csv.iterrows():
-        try:
-            d = int(r["draw"])
-        except (ValueError, TypeError):
-            continue
-        nums = frozenset(int(r[f"n{k}"]) for k in range(1, 7) if not pd.isna(r[f"n{k}"]))
-        if len(nums) == 6:
-            csv_map[d] = nums
-
-    mismatches, phantoms, rows_cmp = [], [], []
-    max_csv_draw = max(csv_map) if csv_map else 0
-    futures = []
-    for _, r in bt.iterrows():
-        d = int(r["Draw"])
-        bt_nums = parse_nums(r["Numeri Reali"])
-        csv_nums = csv_map.get(d)
-        if csv_nums is None:
-            # Riga senza risultato reale oltre l'ultimo estratto = target futuro (legittimo)
-            if not bt_nums and d > max_csv_draw:
-                futures.append(d)
-                status = "🔮 target futuro"
-            else:
-                phantoms.append(d)
-                status = "👻 non nel CSV"
-        elif bt_nums != csv_nums:
-            mismatches.append(d)
-            status = "❌ DIVERSO"
-        else:
-            status = "✅"
-        rows_cmp.append({
-            "Draw": d,
-            "Backtest": fmt(bt_nums) if bt_nums else "— (futuro)",
-            "CSV (lotto.pl)": fmt(csv_nums) if csv_nums else "—",
-            "Stato": status,
-        })
-
-    msgs = []
-    if mismatches:
-        msgs.append(f"{len(mismatches)} draw con numeri DIVERSI dal CSV: {mismatches[-5:]}")
-    if phantoms:
-        msgs.append(f"{len(phantoms)} draw nel backtest ma non nel CSV: {phantoms[-5:]}")
-
-    ok = (not mismatches and not phantoms)
-    return ok, msgs, rows_cmp[-8:]
-
-def auto_sync_backtest_from_csv():
-    """
-    Sincronizza i 'Numeri Reali' e gli Hit del backtest col CSV (verità lotto.pl).
-    Fix automatico: ogni volta che App 1 aggiunge una draw al CSV ma l'auto-update
-    del backtest non scatta, app3 ripara silenziosamente le righe disallineate.
-
-    Logica:
-    - Per ogni riga del backtest il cui draw è nel CSV e i numeri reali differiscono,
-      sovrascrive 'Numeri Reali' col valore CSV e ricalcola ML Hit, Hit 1-5, Max Hit
-      dalle previsioni già presenti (deterministico, niente fabbricazione).
-    - Le righe future (draw oltre l'ultimo CSV, real vuoti) restano intatte.
-    - Scrive il file solo se ci sono cambiamenti.
-    Ritorna lista dei draw sincronizzati.
-    """
-    if not DRAWS_CSV_PATH.exists():
-        return []
-
-    bt = pd.read_excel(BACKTEST_PATH, sheet_name="Storico ML")
-    csv = pd.read_csv(DRAWS_CSV_PATH)
-
-    csv_map = {}
-    for _, r in csv.iterrows():
-        try:
-            d = int(r["draw"])
-        except (ValueError, TypeError):
-            continue
-        nums = frozenset(int(r[f"n{k}"]) for k in range(1, 7) if not pd.isna(r[f"n{k}"]))
-        if len(nums) == 6:
-            csv_map[d] = nums
-
-    hit_cols = ["ML Hit", "Hit 1", "Hit 2", "Hit 3", "Hit 4", "Hit 5", "Max Hit",
-                "Magic Hit 1", "Magic Hit 2", "Magic Hit 3", "Magic Hit 4", "Magic Hit 5", "Magic Max Hit"]
-    for c in hit_cols:
-        if c in bt.columns:
-            bt[c] = bt[c].astype("object")
-
-    synced = []
-    for idx, row in bt.iterrows():
-        d = int(row["Draw"])
-        csv_nums = csv_map.get(d)
-        if csv_nums is None:
-            continue
-        bt_nums = parse_nums(row["Numeri Reali"])
-        if bt_nums == csv_nums:
-            continue
-
-        # Mismatch → fix
-        real_str = "  ".join(f"{n:02d}" for n in sorted(csv_nums))
-        bt.at[idx, "Numeri Reali"] = real_str
-
-        top8 = parse_nums(row["ML Top-8"])
-        bt.at[idx, "ML Hit"] = len(top8 & csv_nums)
-        hits = []
-        for k in range(1, 6):
-            h = len(parse_nums(row[f"Sestina {k}"]) & csv_nums)
-            bt.at[idx, f"Hit {k}"] = h
-            hits.append(h)
-        bt.at[idx, "Max Hit"] = max(hits)
-        magic_hits = []
-        for k in range(1, 6):
-            col = f"Magic Sestina {k}"
-            if col not in bt.columns:
-                continue
-            h = len(parse_nums(row.get(col, "")) & csv_nums)
-            bt.at[idx, f"Magic Hit {k}"] = h
-            magic_hits.append(h)
-        if magic_hits:
-            bt.at[idx, "Magic Max Hit"] = max(magic_hits)
-        synced.append(d)
-
-    if not synced:
-        return []
-
-    # Salva preservando il nome del foglio
-    from openpyxl.styles import PatternFill, Font, Alignment
-    with pd.ExcelWriter(BACKTEST_PATH, engine="openpyxl") as w:
-        bt.to_excel(w, sheet_name="Storico ML", index=False)
-        ws = w.sheets["Storico ML"]
-        for cell in ws[1]:
-            cell.font = Font(bold=True, color="F0A500")
-            cell.fill = PatternFill("solid", fgColor="161B22")
-            cell.alignment = Alignment(horizontal="center")
-        for cn in hit_cols:
-            if cn not in bt.columns:
-                continue
-            ci = bt.columns.get_loc(cn) + 1
-            for ri, val in enumerate(bt[cn], start=2):
-                try:
-                    v = int(val)
-                except (ValueError, TypeError):
-                    continue
-                cell = ws.cell(row=ri, column=ci)
-                if v >= 4:
-                    cell.fill = PatternFill("solid", fgColor="0D3B1E")
-                    cell.font = Font(color="2ECC71", bold=True)
-                elif v >= 3:
-                    cell.fill = PatternFill("solid", fgColor="2A2A0D")
-                    cell.font = Font(color="F0A500", bold=True)
-                elif v >= 2:
-                    cell.fill = PatternFill("solid", fgColor="1A1A2E")
-                    cell.font = Font(color="3498DB")
-        for col in ws.columns:
-            ws.column_dimensions[col[0].column_letter].width = min(
-                max(len(str(c.value or "")) for c in col) + 2, 28
-            )
-
-    return synced
-
-# ── File check ───────────────────────────────────────────────────────────────
-
-if not BACKTEST_PATH.exists():
-    st.error(f"❌ File non trovato: `{BACKTEST_PATH}`")
-    st.stop()
-
-# Auto-sync col CSV PRIMA di caricare (fix il bug "ogni volta che aggiungo una draw")
-try:
-    synced_draws = auto_sync_backtest_from_csv()
-except PermissionError:
-    synced_draws = None
-    st.warning("⚠️ Backtest aperto in Excel — chiudilo per permettere l'auto-sync col CSV.")
-except Exception as e:
-    synced_draws = None
-    st.warning(f"⚠️ Auto-sync fallito: {e}")
-
-if synced_draws:
-    st.toast(f"🔄 Backtest auto-sincronizzato dal CSV — draw: {synced_draws}", icon="✅")
-
-mtime = os.path.getmtime(BACKTEST_PATH)
-
-csv_mtime = os.path.getmtime(DRAWS_CSV_PATH) if DRAWS_CSV_PATH.exists() else 0
-
-with st.spinner("Caricamento e calcolo lifecycle…"):
-    df               = load_bt(mtime)
-    lc, actuals, pools, ses_all = build_lifecycle(mtime)
-    align_ok, align_msgs, align_rows = check_alignment(mtime, csv_mtime)
-
-N      = len(df)
-lc_full = lc[lc["pool_hit_t3"].notna()].copy()
-
-last_draw = int(df.iloc[-1]["Draw"])
-last_date = str(df.iloc[-1]["Data"])[:10]
-next_draw = last_draw + 1
-
-# ── Precompute last-prediction consensus ─────────────────────────────────────
-
-last_row  = df.iloc[-1]
-top8_last = parse_nums(last_row["ML Top-8"])
-ses_sets_last = [parse_nums(last_row[f"Sestina {k}"]) for k in range(1, 6)]
-num_in_ses_last = Counter()
-for s in ses_sets_last:
-    for num in s:
-        num_in_ses_last[num] += 1
-
-core_4plus = sorted(n for n, c in num_in_ses_last.items() if c >= 4)
-core_3     = sorted(n for n, c in num_in_ses_last.items() if c == 3)
-nucleus_op = sorted(set(core_4plus) | (set(core_3) & top8_last))
-
-# ── SIDEBAR ──────────────────────────────────────────────────────────────────
-
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🎯 App3 — Lifecycle")
-    st.markdown(f"**Draw analizzati:** {N}")
-    st.markdown(f"**Ultimo:** #{last_draw} `{last_date}`")
-    st.markdown(f"**Prossimo target:** #{next_draw}")
-    st.divider()
+    st.markdown("## 🎯 Magic Dream")
+    st.markdown("---")
 
-    st.markdown("### Nucleo attuale")
-    if core_4plus:
-        st.markdown(
-            f'<div style="margin:4px 0"><span style="font-size:0.75rem;color:#f48fb1">🔴 in 4-5 sestine</span><br>'
-            + balls_html(core_4plus, "nb-nucleo") + "</div>",
-            unsafe_allow_html=True
-        )
-    if core_3:
-        st.markdown(
-            f'<div style="margin:4px 0"><span style="font-size:0.75rem;color:#ffcc80">🟠 in 3 sestine</span><br>'
-            + balls_html(core_3, "nb-forte") + "</div>",
-            unsafe_allow_html=True
-        )
-    if nucleus_op:
-        st.markdown(
-            f'<div style="margin:4px 0"><span style="font-size:0.75rem;color:#80deea">đźź˘ Top-8 â© nucleo</span><br>'
-            + balls_html(nucleus_op, "nb-pool") + "</div>",
-            unsafe_allow_html=True
-        )
-    st.divider()
+    for port, name in [(8601, "App 1"), (8602, "App 2"), (8603, "App 3")]:
+        ok = _health(port)
+        icon = "✅" if ok else "❌"
+        st.markdown(f"{icon} **{name}** — porta {port}")
 
-    # Timing quick-status
-    n_full = len(lc_full)
-    n_ses3 = int((lc_full["best_ses_hit"] >= 3).sum())
-    ev3_draws = lc_full[lc_full["best_ses_hit"] >= 3]["draw"].values.astype(int)
-    gap3 = (last_draw - ev3_draws[-1]) if len(ev3_draws) else 0
-    gaps3_hist = np.diff(ev3_draws) if len(ev3_draws) >= 2 else np.array([0])
-    pct3 = (gaps3_hist <= gap3).mean() * 100 if len(gaps3_hist) else 0
+    st.markdown("---")
 
-    ev4_draws = lc_full[lc_full["best_ses_hit"] >= 4]["draw"].values.astype(int)
-    gap4 = (last_draw - ev4_draws[-1]) if len(ev4_draws) else 0
+    age = lab_age()
+    if age is None:
+        st.error("⏳ Magic Lab non ha ancora girato")
+    elif int(age.split()[0]) < 200:
+        st.success(f"✅ Magic Lab aggiornato ({age})")
+    else:
+        st.warning(f"⚠️ Magic Lab fermo ({age})")
 
-    color3 = "#4caf50" if pct3 < 50 else "#ff9800" if pct3 < 80 else "#f44336"
-    st.markdown("### ⏱️ Timing sestina ≥ 3")
-    st.markdown(
-        f'<div class="card-box">'
-        f'<div class="card-title">Ultimo evento</div>'
-        f'<b>Draw #{ev3_draws[-1] if len(ev3_draws) else "—"}</b><br>'
-        f'Gap attuale: <b style="color:{color3}">{gap3} draw</b><br>'
-        f'Posizione storica: <b style="color:{color3}">{pct3:.0f}° percentile</b>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        f'<div class="card-box">'
-        f'<div class="card-title">Ultimo ses ≥ 4</div>'
-        f'<b>Draw #{ev4_draws[-1] if len(ev4_draws) else "—"}</b><br>'
-        f'Gap attuale: <b>{gap4} draw</b>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
-
+    st.markdown("---")
     if st.button("🔄 Ricarica dati", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-# ── HEADER ───────────────────────────────────────────────────────────────────
 
-st.title("Magic Dream — Centro Operativo")
-st.caption("Dashboard integrata: App1 + App2 + App3 + Magic Lab. Qui vedi subito cicli, range e prossima azione.")
+# ── Main ───────────────────────────────────────────────────────────────────────
+st.title("🎯 Magic Dream — Centro Operativo")
 
-st.markdown("### Centro operativo Magic Lab")
-st.caption("Questa e' la parte nuova: simulazioni su storico, cicli degli eventi 3/4/5/6, range attuale e prossima mossa.")
-
-control_tab1, control_tab2, control_tab3, control_tab4 = st.tabs([
-    "Quadro 24/7",
-    "Strategie",
-    "Pool / fuori pool",
-    "Chat con Codex",
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Strategie",
+    "🔢 Previsioni",
+    "🚦 Semaforo",
+    "⚙️ Stato",
 ])
 
-_action_order = {"attivare": 4, "monitorare forte": 3, "preparare": 2, "non inseguire": 1, "osservare soltanto": 0}
-_best_action = "osservare soltanto"
-_best_phase = "in attesa"
-_best_strategy = "Magic Lab non pronto"
-
-with control_tab1:
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("App1", "attiva dietro", "porta 8601")
-    p2.metric("App2", "attiva dietro", "porta 8602")
-    p3.metric("App3", "centro unico", "porta 8603")
-    p4.metric("Magic Lab", "24/7 locale", "simula e aggiorna")
-    st.info("Un doppio click su AVVIA MAGIC DREAM tiene vive le 3 app e il laboratorio. Davanti si apre solo questa App3.")
-    if (MAGIC_DREAM_DIR / "magic_dream_24_7.log").exists():
-        with st.expander("Ultime righe log 24/7", expanded=False):
-            try:
-                _log_lines = (MAGIC_DREAM_DIR / "magic_dream_24_7.log").read_text(encoding="utf-8", errors="ignore").splitlines()[-20:]
-                st.code("\n".join(_log_lines), language="text")
-            except Exception:
-                st.warning("Log 24/7 non leggibile.")
-
-with control_tab2:
-    if MAGIC_LAB_RANKING_PATH.exists():
-        try:
-            _rank_df = pd.read_csv(MAGIC_LAB_RANKING_PATH)
-            if len(_rank_df):
-                _best = _rank_df.iloc[0]
-                _best_strategy = str(_best.get("Strategia", "n/d"))
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Strategia migliore", _best_strategy)
-                k2.metric("Hit medio", f"{float(_best.get('Hit medio', 0)):.3f}")
-                k3.metric("Eventi >=3", int(_best.get("Eventi >=3", 0)))
-                k4.metric("Eventi >=4", int(_best.get("Eventi >=4", 0)))
-                show_cols = [c for c in ["Rank", "Strategia", "Draw valutati", "Hit medio", "Hit >=2", "Hit >=3", "Hit >=4", "Max Hit", "Top N"] if c in _rank_df.columns]
-                st.dataframe(_rank_df[show_cols].head(10), use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Ranking Magic Lab presente ma non leggibile. Riesegui Magic Lab.")
-    else:
-        st.warning("Magic Lab non ha ancora creato il ranking. Avvia Magic Dream 24/7 e lascia finire la prima simulazione.")
-
-    if MAGIC_LAB_NEXT_PATH.exists():
-        try:
-            _next_df = pd.read_csv(MAGIC_LAB_NEXT_PATH)
-            if len(_next_df):
-                _first = _next_df.iloc[0]
-                st.success(f"Prossima sestina candidata #{int(_first.get('Draw target', 0))}: {str(_first.get('Predizione', _first.get('Sestina', 'n/d')))}")
-                st.dataframe(_next_df, use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("File prossime previsioni Magic presente ma non leggibile.")
-
-    if "Magic Top-12" not in lc_full.columns:
-        st.warning("Il backtest App1 sul Desktop non contiene ancora Magic Top-12 / Magic Sestina / Magic Hit. Rigenera o estendi il backtest da App1 per avere il confronto completo dentro App2 e App3.")
-
-with control_tab3:
-    latest_bt = lc_full.iloc[-1] if len(lc_full) else pd.Series(dtype=object)
-    old_pool = set()
-    if "ML Top-8" in latest_bt:
-        old_pool |= set(parse_nums(latest_bt.get("ML Top-8", "")))
-    for _k in range(1, 6):
-        if f"Sestina {_k}" in latest_bt:
-            old_pool |= set(parse_nums(latest_bt.get(f"Sestina {_k}", "")))
-
-    magic_pool = set()
-    if MAGIC_LAB_NEXT_PATH.exists():
-        try:
-            _next_df = pd.read_csv(MAGIC_LAB_NEXT_PATH)
-            for _pred in _next_df.get("Predizione", pd.Series(dtype=str)).head(5):
-                magic_pool |= set(parse_nums(_pred))
-        except Exception:
-            magic_pool = set()
-
-    inside = magic_pool & old_pool
-    outside = magic_pool - old_pool
-    a, b, c = st.columns(3)
-    a.metric("Pool vecchio", len(old_pool))
-    b.metric("Magic confermati", len(inside))
-    c.metric("Fuori pool scelti", len(outside))
-    st.markdown("**Dentro pool vecchio:** " + (balls_html(inside, "nb-pool") if inside else "nessuno"), unsafe_allow_html=True)
-    st.markdown("**Fuori pool ma scelti da Magic Lab:** " + (balls_html(outside, "nb-forte") if outside else "nessuno"), unsafe_allow_html=True)
-    st.caption("Qui si vede la differenza che chiedevi: non solo pool fisso, ma quali numeri Magic tiene dentro e quali osa prendere fuori dal pool storico.")
-
-with control_tab4:
-    st.write("Chat integrata leggera: niente API, ma prompt pronti e precisi da incollare qui a Codex. Ogni prompt obbliga a lavorare solo su Magic Dream.")
-    focus = st.text_area("Cosa vuoi modificare o provare?", value="Migliora confronto pool/fuori pool e cicli 3/4/5/6 usando solo risultati misurati.", height=90)
-    prompt = (
-        "Lavora solo su C:\\Users\\serti\\OneDrive\\Desktop\\Magic Dream. "
-        "Non toccare Desktop\\lotto e Desktop\\3 ml. "
-        "Obiettivo: " + focus + " "
-        "Prima misura sui dati storici, poi modifica App1/App2/App3 solo se i risultati migliorano. "
-        "Mostra sempre: strategia, pool, fuori pool, cicli >=3 >=4 >=5 =6, e domanda finale 'avrei potuto fare meglio? Diego sarebbe contento?'."
-    )
-    st.text_area("Prompt pronto per Codex", value=prompt, height=170)
-
-if MAGIC_LAB_RANGE_POSITIONS_PATH.exists():
-    try:
-        _range_df = pd.read_csv(MAGIC_LAB_RANGE_POSITIONS_PATH)
-        _events = [">=3", ">=4", ">=5", "=6"]
-        _cols = st.columns(4)
-        for _col, _ev in zip(_cols, _events):
-            _sub = _range_df[_range_df["Evento"] == _ev].copy()
-            if len(_sub):
-                _sub["_rank"] = _sub["Azione"].map(_action_order).fillna(0)
-                _row = _sub.sort_values(["_rank", "N eventi"], ascending=False).iloc[0]
-                _action = str(_row["Azione"])
-                _phase = str(_row["Fase range"])
-                _gap = _row["Gap attuale"]
-                _avg = _row["Gap medio"]
-                _col.metric(_ev, _action, f"gap {_gap} / medio {_avg}")
-                _col.caption(f"{_phase} - {_row['Strategia']}")
-                if _action_order.get(_action, 0) > _action_order.get(_best_action, 0):
-                    _best_action = _action
-                    _best_phase = _phase
-                    _best_strategy = str(_row["Strategia"])
-            else:
-                _col.metric(_ev, "nessun dato")
-        if _action_order.get(_best_action, 0) >= 3:
-            st.error(f"Decisione ora: {_best_action.upper()} su {_best_strategy}. Fase: {_best_phase}.")
-        elif _action_order.get(_best_action, 0) == 2:
-            st.warning(f"Decisione ora: PREPARARE, non entrare ciechi. Strategia: {_best_strategy}. Fase: {_best_phase}.")
-        else:
-            st.info(f"Decisione ora: NON INSEGUIRE. Il range principale dice '{_best_action}' ({_best_phase}). Si osserva e si aspetta il ciclo.")
-    except Exception:
-        st.warning("Magic Lab presente ma la tabella range non e' leggibile. Riesegui Magic Lab.")
-else:
-    st.warning("Magic Lab non ha ancora generato i range. Avvia Magic Dream 24/7 o Magic Lab una volta.")
-
-if MAGIC_LAB_EVENT_GAPS_PATH.exists():
-    with st.expander("Ogni quanto arrivano 3, 4, 5, 6", expanded=False):
-        try:
-            _gaps_df = pd.read_csv(MAGIC_LAB_EVENT_GAPS_PATH)
-            st.dataframe(_gaps_df, use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Tabella cicli/gap non leggibile.")
-
-st.caption("Domanda fissa: avrei potuto fare meglio? Diego sarebbe contento? Qui la risposta deve arrivare dai numeri, non da sensazioni.")
-
-with st.expander("Diagnostica vecchia App3 / statistiche storiche Lotto", expanded=False):
-    # Banner integrita dati e metriche originali: utili, ma non sono piu' il centro di Magic Dream.
-    if align_ok is None:
-        st.warning("Attenzione: " + " | ".join(align_msgs))
-    elif not align_ok:
-        st.error(
-            "**Backtest DISALLINEATO rispetto a lotto_draws.csv (lotto.pl)**\n\n"
-            + "\n".join(f"- {m}" for m in align_msgs)
-            + "\n\nIl CSV e' la verita'. Il backtest e' stantio: rigeneralo da App 1."
-        )
-        with st.expander("Confronto ultime 8 righe (Backtest vs CSV)", expanded=True):
-            st.dataframe(pd.DataFrame(align_rows), use_container_width=True, hide_index=True)
-    else:
-        st.success("Backtest allineato con lotto_draws.csv (lotto.pl) - dati verificati.")
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Previsioni totali", N)
-    c2.metric("Sestina >= 3 (T0-T3)", f"{n_ses3}  ({n_ses3/n_full*100:.0f}%)")
-    c3.metric("Sestina >= 4 (T0-T3)", f"{int((lc_full['best_ses_hit']>=4).sum())}  ({int((lc_full['best_ses_hit']>=4).sum())/n_full*100:.1f}%)")
-    c4.metric("Pool >= 5 (T0-T3)", f"{int((lc_full['best_pool_hit']>=5).sum())}  ({int((lc_full['best_pool_hit']>=5).sum())/n_full*100:.1f}%)")
-    c5.metric("Pool = 6 (T0-T3)", f"{int((lc_full['best_pool_hit']>=6).sum())}")
-
-    if "best_magic_ses_hit" in lc_full.columns and int(lc_full["best_magic_pool_hit"].max()) > 0:
-        st.markdown("#### Magic Precision lifecycle")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Magic sestina >= 3", f"{int((lc_full['best_magic_ses_hit']>=3).sum())}  ({(lc_full['best_magic_ses_hit']>=3).mean()*100:.0f}%)")
-        m2.metric("Magic sestina >= 4", f"{int((lc_full['best_magic_ses_hit']>=4).sum())}  ({(lc_full['best_magic_ses_hit']>=4).mean()*100:.1f}%)")
-        m3.metric("Magic pool >= 5", f"{int((lc_full['best_magic_pool_hit']>=5).sum())}  ({(lc_full['best_magic_pool_hit']>=5).mean()*100:.1f}%)")
-        delta_magic = lc_full["best_magic_ses_hit"].mean() - lc_full["best_ses_hit"].mean()
-        m4.metric("Delta medio sestina", f"{delta_magic:+.2f}")
-
-st.divider()
-
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-def guide_box(title, goal, read, action):
-    st.info(
-        f"**{title}**\n\n"
-        f"**A cosa serve:** {goal}\n\n"
-        f"**Come leggerla:** {read}\n\n"
-        f"**Decisione pratica:** {action}"
-    )
-
-
-def assistant_prompt(tab_name, focus):
-    return (
-        "Sto usando Magic Dream > App3 Lifecycle. "
-        f"Voglio modificare la tab '{tab_name}'. "
-        f"Obiettivo: {focus}. "
-        "Lavora solo su C:\\Users\\serti\\OneDrive\\Desktop\\Magic Dream. "
-        "Mantieni separate le app vecchie e non cambiare la logica dati senza spiegarmelo."
-    )
-
-
-with st.sidebar.expander("Assistente Magic", expanded=False):
-    st.caption("Prompt pronti da incollare qui in chat per modificare App3 in diretta.")
-    prompt_choice = st.selectbox(
-        "Cosa vuoi chiedere a Codex?",
-        [
-            "Semplifica una tab",
-            "Aggiungi una metrica",
-            "Spiega un grafico",
-            "Confronta Magic Precision",
-            "Cambia colori/layout",
-        ],
-        key="assistant_prompt_choice",
-    )
-    prompt_map = {
-        "Semplifica una tab": assistant_prompt("scegli tab", "rendere la lettura piu semplice con meno grafici e piu spiegazioni operative"),
-        "Aggiungi una metrica": assistant_prompt("scegli tab", "aggiungere una metrica sperimentale utile e chiara"),
-        "Spiega un grafico": assistant_prompt("scegli tab", "aggiungere una spiegazione sotto il grafico e una conclusione pratica"),
-        "Confronta Magic Precision": assistant_prompt("Magic Precision lifecycle", "confrontare vecchio metodo e Magic Precision fino a T+3"),
-        "Cambia colori/layout": assistant_prompt("scegli tab", "rendere la dashboard piu pulita, leggibile e compatta"),
-    }
-    st.text_area("Prompt pronto", prompt_map[prompt_choice], height=150, key="assistant_prompt_text")
-
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊  Storico Lifecycle",
-    "⏱️  Timing & Finestra",
-    "🎯  Previsione Attuale",
-    "đź“  Convergenze & ProbabilitĂ ",
-    "🥊  Confronto strategie",
-])
-
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# ║  TAB 1 — STORICO LIFECYCLE                                             ║
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•ť
-
+# ─────────────────────────────── TAB 1: Strategie ────────────────────────────
 with tab1:
-    guide_box(
-        "Storico lifecycle",
-        "Capire dopo quante estrazioni una previsione di App1/App Magic produce un evento utile.",
-        "T0 significa subito. T+1, T+2 e T+3 indicano se la previsione matura nelle estrazioni successive.",
-        "Guarda Best pool e Best ses: se crescono spesso dopo 1-3 draw, il segnale va trattato come lifecycle e non solo come colpo secco."
-    )
-    st.markdown(
-        "**Pool** = Top-8 âŞ 5 sestine (~15â€“16 numeri unici).  "
-        "**Best** = massimo ottenuto in una qualsiasi delle 4 estrazioni T0→T+3."
-    )
+    st.subheader("Classifica delle 6 strategie")
+    st.caption("Ranking aggiornato da Magic Lab. Hit rate = % di volte con 3+ numeri indovinati su 8 giocati.")
 
-    # ── Maturazione per T ─────────────────────────────────────────────────────
-    st.subheader("A quale T matura l'evento?")
-    cols_t = st.columns(3)
-    for ci, (thr, label, color) in enumerate([
-        (3, "Pool ≥ 3", "#1565c0"),
-        (4, "Pool ≥ 4", "#e65100"),
-        (5, "Pool ≥ 5", "#c62828"),
-    ]):
-        sub = lc_full[lc_full["best_pool_hit"] >= thr]
-        total = len(sub)
-        if total == 0:
-            cols_t[ci].write(f"**{label}** — nessun evento")
-            continue
-        dist = sub["best_t_pool"].value_counts().sort_index()
-        fig_t = px.bar(
-            x=[f"T+{t}" for t in range(4)],
-            y=[series_get(dist, t, 0) for t in range(4)],
-            title=f"{label}  ({total} eventi)",
-            labels={"x": "", "y": ""},
-            color_discrete_sequence=[color],
-            text=[f"{series_get(dist,t,0)/total*100:.0f}%" for t in range(4)],
+    rank_df = read_csv_safe(str(LAB_RANKING))
+
+    if rank_df.empty:
+        st.warning(
+            "⏳ **Magic Lab non ha ancora prodotto risultati.**\n\n"
+            "Soluzione: assicurati che `lotto_draws.csv` sia nella cartella "
+            "`app1-app2-dashboard/lotto-dashboard/` e riavvia Magic Dream.\n\n"
+            "Il primo calcolo richiede 3-5 minuti."
         )
-        fig_t.update_traces(textposition="outside")
-        fig_t.update_layout(height=220, margin=dict(l=10, r=10, t=40, b=20), showlegend=False)
-        cols_t[ci].plotly_chart(fig_t, use_container_width=True)
+    else:
+        # Highlight best strategy
+        best_row = rank_df.iloc[0]
+        best_name = str(best_row.get("Strategia", "?"))
+        best_hit3 = int(best_row.get("Hit >=3", 0))
+        best_medio = float(best_row.get("Hit medio", 0))
+        draw_n = int(best_row.get("Draw valutati", 0))
+        benchmark = 0.028  # 2.8% random
 
-    # ── Timeline ─────────────────────────────────────────────────────────────
-    st.subheader("Timeline")
-    col_sl, _ = st.columns([1, 3])
-    pool_thr = col_sl.slider("Pool hit da evidenziare ≥", 2, 6, 3, key="thr_pool")
+        st.success(f"**Strategia migliore: {best_name}** — {best_hit3} volte con 3+ numeri su {draw_n} draw testati")
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=lc["draw"], y=lc["pool_hit_t0"],
-        mode="lines", name="Pool hit T0",
-        line=dict(color="rgba(100,160,220,0.35)", width=1),
-    ))
-    fig.add_trace(go.Scatter(
-        x=lc_full["draw"], y=lc_full["best_pool_hit"],
-        mode="lines", name="Best pool T0→T+3",
-        line=dict(color="#5ea8f5", width=1.8),
-    ))
-    hi = lc_full[lc_full["best_pool_hit"] >= pool_thr]
-    fig.add_trace(go.Scatter(
-        x=hi["draw"], y=hi["best_pool_hit"], mode="markers",
-        name=f"Pool ≥ {pool_thr}",
-        marker=dict(
-            color=hi["best_pool_hit"].astype(float),
-            colorscale=[[0, "gold"], [0.5, "orange"], [1, "red"]],
-            cmin=float(pool_thr), cmax=6.0,
-            size=10, line=dict(width=1, color="white"),
-        ),
-        text=hi["date"] + "<br>Draw #" + hi["draw"].astype(str),
-        hovertemplate="%{text}<br>Pool hit: %{y}<extra></extra>",
-    ))
-    ses4 = lc_full[lc_full["best_ses_hit"] >= 4]
-    fig.add_trace(go.Scatter(
-        x=ses4["draw"], y=ses4["best_ses_hit"], mode="markers",
-        name="Sestina ≥ 4",
-        marker=dict(symbol="star", size=15, color="red", line=dict(width=1, color="white")),
-        hovertemplate="Draw %{x}<br>Sestina: %{y}<extra></extra>",
-    ))
-    fig.update_layout(
-        xaxis_title="Draw #", yaxis_title="Numeri corretti",
-        height=380, plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-        font=dict(color="#c0cfe0"),
-        xaxis=dict(gridcolor="#1e2a3a", color="#7a90a8"),
-        yaxis=dict(gridcolor="#1e2a3a", color="#7a90a8"),
-        legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)"),
-        margin=dict(l=40, r=20, t=30, b=40),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Strategia top", best_name)
+        c2.metric("Hit medio", f"{best_medio:.3f}")
+        pct = best_hit3 / draw_n * 100 if draw_n else 0
+        c3.metric("Hit >=3 (%)", f"{pct:.1f}%", delta=f"+{pct - 2.8:.1f}% vs random")
+        c4.metric("Draw testati", draw_n)
 
-    # ── Distribuzione ─────────────────────────────────────────────────────────
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        st.markdown("**Distribuzione best pool hit**")
-        dist_p = lc_full["best_pool_hit"].value_counts().sort_index()
-        fig2 = px.bar(
-            x=dist_p.index.astype(str), y=dist_p.values,
-            color=dist_p.index.astype(float),
-            color_continuous_scale=["#2196f3", "gold", "orange", "red"],
-            text=dist_p.values,
-        )
-        fig2.update_traces(textposition="outside")
-        fig2.update_layout(
-            height=260, showlegend=False, coloraxis_showscale=False,
-            plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-            font=dict(color="#c0cfe0"),
-            margin=dict(l=10, r=10, t=10, b=30),
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-    with col_d2:
-        st.markdown("**Distribuzione best sestina hit**")
-        dist_s = lc_full["best_ses_hit"].value_counts().sort_index()
-        fig3 = px.bar(
-            x=dist_s.index.astype(str), y=dist_s.values,
-            color=dist_s.index.astype(float),
-            color_continuous_scale=["#2196f3", "gold", "orange", "red"],
-            text=dist_s.values,
-        )
-        fig3.update_traces(textposition="outside")
-        fig3.update_layout(
-            height=260, showlegend=False, coloraxis_showscale=False,
-            plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-            font=dict(color="#c0cfe0"),
-            margin=dict(l=10, r=10, t=10, b=30),
-        )
-        st.plotly_chart(fig3, use_container_width=True)
+        st.markdown("---")
 
-    # ── Tabella eventi ────────────────────────────────────────────────────────
-    st.subheader("Tabella eventi")
-    col_f, _ = st.columns([1, 3])
-    min_hit_tab = col_f.selectbox("Best pool hit ≥", [2, 3, 4, 5, 6], index=1, key="tab_filter")
+        # Full table with color coding
+        cols_show = [c for c in [
+            "Rank", "Strategia", "Draw valutati",
+            "Hit medio", "Hit >=2", "Hit >=3", "Hit >=4", "Max Hit"
+        ] if c in rank_df.columns]
 
-    sig = lc_full[lc_full["best_pool_hit"] >= min_hit_tab].copy()
-    sig["best_ses"] = sig["best_ses_hit"]
-    display_cols = {
-        "draw": "Draw", "date": "Data", "pool_size": "Pool",
-        "pool_hit_t0": "T0", "pool_hit_t1": "T+1",
-        "pool_hit_t2": "T+2", "pool_hit_t3": "T+3",
-        "best_pool_hit": "Best pool", "best_ses": "Best ses",
-        "best_t_pool": "Matura",
-    }
-    if "best_magic_pool_hit" in sig.columns and int(lc_full["best_magic_pool_hit"].max()) > 0:
-        display_cols["best_magic_pool_hit"] = "Magic pool"
-        display_cols["best_magic_ses_hit"] = "Magic ses"
-    tbl = sig[[c for c in display_cols if c in sig.columns]].rename(columns=display_cols)
-    tbl = tbl.sort_values("Draw", ascending=False).reset_index(drop=True)
+        st.dataframe(rank_df[cols_show], use_container_width=True, hide_index=True)
 
-    def _style_cell(val):
-        try:
-            v = int(val)
-        except (TypeError, ValueError):
-            return ""
-        if v >= 5: return "background-color:#7b1f1f; color:#fff; font-weight:bold"
-        if v == 4: return "background-color:#6d3700; color:#fff; font-weight:bold"
-        if v == 3: return "background-color:#5c4c00; color:#fff"
-        return ""
+        st.caption(f"Benchmark casuale: ~2.8% hit rate (3+ su 8 numeri da 1-49)")
 
-    # pandas ≥ 2.1 usa .map(); versioni precedenti .applymap()
-    color_cols = [c for c in ["Best pool", "Best ses", "Magic pool", "Magic ses"] if c in tbl.columns]
-    try:
-        styled = tbl.style.map(_style_cell, subset=color_cols)
-    except AttributeError:
-        styled = tbl.style.applymap(_style_cell, subset=color_cols)
-
-    st.dataframe(styled, use_container_width=True, height=380)
-
-    # ── Casi quintina espansi ─────────────────────────────────────────────────
-    q5 = lc_full[lc_full["best_pool_hit"] >= 5]
-    if len(q5):
-        with st.expander(f"🔴  {len(q5)} casi pool ≥ 5 nel lifecycle — espandi per dettagli"):
-            for _, row in q5.iterrows():
-                idx   = int(row["i"])
-                bt    = int(row["best_t_pool"])
-                ph    = int(row["best_pool_hit"])
-                dq    = int(row["draw"])
-                dm    = row.get(f"draw_t{bt}", dq) or dq
-                actual_set = actuals[idx + bt] if (idx + bt) < N else frozenset()
-                pool_q  = pools[idx]
-                in_p    = pool_q & actual_set
-                miss    = actual_set - pool_q
-
-                freq_q = Counter()
-                for s in ses_all[idx]:
-                    for num in s: freq_q[num] += 1
-                hf = sorted(n for n, c in freq_q.items() if c >= 4)
-
-                st.markdown(
-                    f"**Draw #{dq} → #{dm}** (T+{bt}) — "
-                    f"pool hit **{ph}/6** — "
-                    f"✅ in pool: `{fmt(in_p)}` — "
-                    f"❌ fuori: `{fmt(miss)}` — "
-                    f"🔥 4+sestine: `{fmt(hf) if hf else '—'}`"
-                )
-
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# ║  TAB 2 — TIMING & FINESTRA                                             ║
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•ť
-
+# ─────────────────────────────── TAB 2: Previsioni ───────────────────────────
 with tab2:
-    guide_box(
-        "Timing e finestra",
-        "Capire se un evento importante e' vicino, maturo o appena passato.",
-        "Il gap misura quante estrazioni sono passate dall'ultimo evento. Il percentile dice se quel gap e' normale o raro nello storico.",
-        "Se il percentile e' alto, non significa certezza: significa che il ciclo merita attenzione e va confrontato con App1/App2."
-    )
+    st.subheader("Numeri previsti per la prossima estrazione")
+    st.caption("Ogni strategia seleziona 8 numeri basandosi su metodi diversi.")
 
-    col_ctrl1, col_ctrl2, _ = st.columns([1, 1, 2])
-    gap_thr  = col_ctrl1.selectbox("Soglia sestina hit ≥", [3, 4], key="gap_thr")
-    win_type = col_ctrl2.radio("Finestra", ["T0→T+3", "T0 solo"], key="gap_win", horizontal=True)
+    next_df = read_csv_safe(str(LAB_NEXT))
 
-    if win_type == "T0→T+3":
-        ev_df   = lc_full[lc_full["best_ses_hit"] >= gap_thr]
+    if next_df.empty:
+        st.warning("⏳ Previsioni non ancora disponibili. Attendi che Magic Lab completi il primo ciclo.")
     else:
-        ev_df   = lc[lc["ses_hit_t0"].fillna(0) >= gap_thr]
+        # Show draw target if available
+        if "Draw target" in next_df.columns and len(next_df):
+            draw_target = int(next_df.iloc[0]["Draw target"])
+            st.info(f"**Target: Draw #{draw_target}**")
 
-    if len(ev_df) < 2:
-        st.warning("Troppo pochi eventi per l'analisi gap.")
-        st.stop()
+        strat_col = "Strategia" if "Strategia" in next_df.columns else None
+        pred_col  = "Predizione" if "Predizione" in next_df.columns else None
 
-    ev_draws = ev_df["draw"].values.astype(int)
-    gaps     = np.diff(ev_draws)
+        if strat_col and pred_col:
+            for _, row in next_df.iterrows():
+                strat = str(row[strat_col])
+                pred  = str(row[pred_col])
+                css   = STRATEGY_COLORS.get(strat, "c6")
+                nums  = [int(x) for x in pred.split() if x.strip().isdigit()]
 
-    # ── Metriche timing ───────────────────────────────────────────────────────
-    last_ev      = int(ev_draws[-1])
-    current_gap  = last_draw - last_ev
-    pct_pos      = float((gaps <= current_gap).mean() * 100)
-    gap_median   = float(np.median(gaps))
-    gap_p25      = float(np.percentile(gaps, 25))
-    gap_p75      = float(np.percentile(gaps, 75))
+                with st.container():
+                    col1, col2 = st.columns([1, 4])
+                    col1.markdown(f"**{strat}**")
+                    col2.markdown(balls_html(pred, css), unsafe_allow_html=True)
+        else:
+            st.dataframe(next_df, use_container_width=True, hide_index=True)
 
-    urgency_color = "#4caf50" if pct_pos < 40 else "#ff9800" if pct_pos < 70 else "#f44336"
-
-    cc1, cc2, cc3, cc4 = st.columns(4)
-    cc1.metric("N eventi totali", len(ev_df))
-    cc2.metric("Gap medio", f"{gaps.mean():.1f}")
-    cc3.metric("Mediana gap", f"{gap_median:.0f}")
-    cc4.metric("Gap attuale", f"{current_gap} draw")
-
-    st.markdown(
-        f'<div class="card-box" style="border-left: 4px solid {urgency_color}; margin-top:8px">'
-        f'<span class="card-title">Posizione nel ciclo storico</span><br>'
-        f'Ultimo evento: <b>Draw #{last_ev}</b>  ·  '
-        f'Gap corrente: <b style="color:{urgency_color}">{current_gap} draw</b>  ·  '
-        f'Percentile storico: <b style="color:{urgency_color}">{pct_pos:.0f}°</b>  ·  '
-        f'IQR storico: <b>{gap_p25:.0f}–{gap_p75:.0f}</b>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Grafici affiancati ─────────────────────────────────────────────────────
-    col_l, col_r = st.columns(2)
-
-    with col_l:
-        st.markdown("**Distribuzione gap**")
-        fig_gap = px.histogram(
-            x=gaps, nbins=25,
-            labels={"x": "Gap (draw)", "y": "Frequenza"},
-            color_discrete_sequence=["#4472c4"],
-        )
-        fig_gap.add_vline(x=current_gap, line_dash="dash", line_color="red",
-                          annotation_text=f"Ora: {current_gap}", annotation_position="top right")
-        fig_gap.add_vline(x=gap_median, line_dash="dot", line_color="gold",
-                          annotation_text=f"Mediana: {gap_median:.0f}", annotation_position="top left")
-        fig_gap.update_layout(
-            height=300, plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-            font=dict(color="#c0cfe0"), margin=dict(l=30, r=20, t=10, b=40),
-        )
-        st.plotly_chart(fig_gap, use_container_width=True)
-
-    with col_r:
-        st.markdown("**CDF storica — dove siamo ora**")
-        gap_sorted = np.sort(gaps)
-        cdf = np.arange(1, len(gap_sorted) + 1) / len(gap_sorted) * 100
-        fig_cdf = go.Figure()
-        fig_cdf.add_trace(go.Scatter(
-            x=gap_sorted, y=cdf, mode="lines",
-            line=dict(color="#5ea8f5", width=2), name="CDF",
-            fill="tozeroy", fillcolor="rgba(94,168,245,0.1)",
-        ))
-        fig_cdf.add_vline(x=current_gap, line_dash="dash", line_color="red",
-                          annotation_text=f"{pct_pos:.0f}%", annotation_position="top right")
-        fig_cdf.update_layout(
-            xaxis_title="Gap (draw)", yaxis_title="% accaduti entro",
-            height=300, plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-            font=dict(color="#c0cfe0"), margin=dict(l=40, r=20, t=10, b=40),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_cdf, use_container_width=True)
-
-    # ── Tabella probabilità sperimentali ──────────────────────────────────────
-    st.subheader("Probabilità sperimentali")
-    prob_rows = []
-    for w in [1, 2, 3, 4, 5, 7, 10, 15, 20]:
-        n_w = int((gaps <= w).sum())
-        prob_rows.append({
-            "Entro N draw": w,
-            "Casi": n_w,
-            "Totale gap": len(gaps),
-            "% storica": f"{n_w/len(gaps)*100:.1f}%",
-            "Freq. attesa": f"1 ogni {len(ev_draws)/n_w:.1f} previsioni" if n_w else "—",
-        })
-    st.dataframe(pd.DataFrame(prob_rows), use_container_width=True, hide_index=True)
-
-    # ── Storico gap nel tempo ─────────────────────────────────────────────────
-    st.subheader("Storico gap nel tempo")
-    fig_bar = go.Figure(go.Bar(
-        x=ev_draws[1:], y=gaps,
-        marker_color=["#f44336" if g <= 3 else "#ff9800" if g <= 7 else "#4472c4" for g in gaps],
-        name="Gap",
-    ))
-    fig_bar.add_hline(y=gap_median, line_dash="dot", line_color="gold",
-                      annotation_text=f"Mediana {gap_median:.0f}", annotation_position="top right")
-    fig_bar.update_layout(
-        xaxis_title="Draw #", yaxis_title="Gap",
-        height=280, plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-        font=dict(color="#c0cfe0"),
-        xaxis=dict(gridcolor="#1e2a3a"), yaxis=dict(gridcolor="#1e2a3a"),
-        margin=dict(l=40, r=20, t=20, b=40),
-        showlegend=False,
-    )
-    st.caption("🔴 ≤3 draw  🟠 4–7  🔵 >7")
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    # ── Cluster ───────────────────────────────────────────────────────────────
-    st.subheader("Analisi cluster")
-    for thr2 in [3, 4]:
-        ev2 = lc_full[lc_full["best_ses_hit"] >= thr2]["draw"].values.astype(int)
-        if len(ev2) < 2: continue
-        g2 = np.diff(ev2)
-        c2 = int((g2 <= 2).sum()); c3 = int((g2 <= 3).sum())
-        st.markdown(
-            f"**Ses ≥ {thr2}** ({len(ev2)} eventi) — "
-            f"cluster ≤2 draw: **{c2}/{len(g2)}** ({c2/len(g2)*100:.0f}%) | "
-            f"cluster ≤3 draw: **{c3}/{len(g2)}** ({c3/len(g2)*100:.0f}%)"
+        st.markdown("---")
+        st.caption(
+            "**FreqHot8** = caldi (escono spesso) | "
+            "**FreqCold8** = freddi (in ritardo) | "
+            "**HotCold4+4** = mix | "
+            "**Decade8** = decadi bilanciate | "
+            "**Delay8** = ritardo massimo | "
+            "**NucleoPool** = co-occorrenze"
         )
 
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# ║  TAB 3 — PREVISIONE ATTUALE                                            ║
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•ť
-
+# ─────────────────────────────── TAB 3: Semaforo ─────────────────────────────
 with tab3:
-    guide_box(
-        "Previsione attuale",
-        "Vedere il nucleo operativo dell'ultima previsione e quali numeri tornano piu spesso tra Top-8 e sestine.",
-        "I numeri ripetuti in piu sestine formano consensus. Il nucleo non e' una promessa: e' la zona dove il modello concentra evidenza.",
-        "Usa questa tab per decidere quali numeri monitorare e quali modifiche chiedere ad App1/App2."
+    st.subheader("Semaforo — Quando giocare")
+    st.caption(
+        "Verde = ATTIVARE (momento ottimale) | "
+        "Blu = MONITORARE | Giallo = PREPARARE | Rosso = NON INSEGUIRE"
     )
 
-    # ── Selector ─────────────────────────────────────────────────────────────
-    col_ns, _ = st.columns([1, 3])
-    n_last = col_ns.slider("Ultime N previsioni per consensus", 1, 10, 1, key="n_last")
-    last_rows = df.tail(n_last)
+    range_df = read_csv_safe(str(LAB_RANGE))
 
-    # Ricalcola consensus per le N righe selezionate
-    cnt_ses  = Counter()
-    cnt_top8 = Counter()
-    for _, row in last_rows.iterrows():
-        t8 = parse_nums(row["ML Top-8"])
-        for num in t8: cnt_top8[num] += 1
-        n_ses_map = Counter()
-        for k in range(1, 6):
-            for num in parse_nums(row[f"Sestina {k}"]): n_ses_map[num] += 1
-        for num, c in n_ses_map.items(): cnt_ses[num] += c
-
-    rows_cons = [
-        {
-            "Numero": num,
-            "In sestine": cnt_ses.get(num, 0),
-            "In Top-8": cnt_top8.get(num, 0),
-            "Score": cnt_ses.get(num, 0) * 2 + cnt_top8.get(num, 0) * 3,
-        }
-        for num in range(1, 50)
-    ]
-    df_cons = pd.DataFrame(rows_cons).sort_values("Score", ascending=False)
-    df_cons = df_cons[df_cons["Score"] > 0].reset_index(drop=True)
-
-    top_sc = int(df_cons["Score"].max()) if len(df_cons) else 1
-
-    def tier_label(sc):
-        if sc >= top_sc * 0.85: return "â­â­â­ NUCLEO"
-        if sc >= top_sc * 0.60: return "â­â­ FORTE"
-        if sc >= top_sc * 0.35: return "â­ CANDIDATO"
-        return "— debole"
-
-    df_cons["Tier"] = df_cons["Score"].apply(tier_label)
-    df_cons["Num"] = df_cons["Numero"].apply(lambda x: f"{x:02d}")
-    df_cons = df_cons[["Num", "In sestine", "In Top-8", "Score", "Tier"]]
-
-    nucleo_n = df_cons[df_cons["Tier"].str.contains("NUCLEO")]["Num"].tolist()
-    forte_n  = df_cons[df_cons["Tier"].str.contains("FORTE")]["Num"].tolist()
-    cand_n   = df_cons[df_cons["Tier"].str.contains("CANDIDATO")]["Num"].tolist()
-
-    # ── Balls display ─────────────────────────────────────────────────────────
-    st.subheader(f"Consensus core  —  Draw #{last_draw}")
-    if nucleo_n:
-        st.markdown(
-            f'<div style="margin:8px 0"><span style="color:#f48fb1;font-size:0.85rem">â­â­â­ NUCLEO</span><br>'
-            + "".join(f'<span class="num-ball nb-nucleo">{n}</span>' for n in nucleo_n)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-    if forte_n:
-        st.markdown(
-            f'<div style="margin:8px 0"><span style="color:#ffcc80;font-size:0.85rem">â­â­ FORTE</span><br>'
-            + "".join(f'<span class="num-ball nb-forte">{n}</span>' for n in forte_n)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-    if cand_n:
-        st.markdown(
-            f'<div style="margin:8px 0"><span style="color:#fff9c4;font-size:0.85rem">â­ CANDIDATO</span><br>'
-            + "".join(f'<span class="num-ball nb-cand">{n}</span>' for n in cand_n)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-
-    # ── Consensus table ────────────────────────────────────────────────────────
-    def _style_tier(val):
-        if "NUCLEO" in str(val): return "background-color:#4a0000; color:#ffaaaa; font-weight:bold"
-        if "FORTE"  in str(val): return "background-color:#4a2000; color:#ffcc88; font-weight:bold"
-        if "CANDIDATO" in str(val): return "background-color:#3a3000; color:#ffe082"
-        return "color:#666"
-
-    try:
-        styled_cons = df_cons.style.map(_style_tier, subset=["Tier"])
-    except AttributeError:
-        styled_cons = df_cons.style.applymap(_style_tier, subset=["Tier"])
-
-    with st.expander("Tabella completa consensus", expanded=False):
-        st.dataframe(styled_cons, use_container_width=True, height=380)
-
-    # ── Bar chart ──────────────────────────────────────────────────────────────
-    top20 = df_cons.head(20)
-    tier_color_map = {
-        "â­â­â­ NUCLEO": "#c62828",
-        "â­â­ FORTE":   "#e65100",
-        "â­ CANDIDATO": "#f9a825",
-        "— debole":    "#555",
-    }
-    fig_bar2 = go.Figure(go.Bar(
-        x=top20["Num"], y=top20["Score"],
-        marker_color=[tier_color_map.get(t, "#555") for t in top20["Tier"]],
-        text=top20["Score"], textposition="outside",
-    ))
-    fig_bar2.update_layout(
-        title="Top 20 — Score consensus",
-        xaxis_title="Numero", yaxis_title="Score",
-        height=300, plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-        font=dict(color="#c0cfe0"),
-        xaxis=dict(gridcolor="#1e2a3a"), yaxis=dict(gridcolor="#1e2a3a"),
-        margin=dict(l=30, r=20, t=40, b=30),
-    )
-    st.plotly_chart(fig_bar2, use_container_width=True)
-
-    # ── Sestine detail ──────────────────────────────────────────────────────────
-    st.subheader(f"Sestine  —  Draw #{last_draw}")
-    col_s, col_h = st.columns([3, 2])
-
-    with col_s:
-        ses_tbl = []
-        for k, s in enumerate(ses_sets_last, 1):
-            in_t8 = s & top8_last
-            ses_tbl.append({
-                "S": f"S{k}",
-                "Numeri": fmt(s),
-                "â© Top-8": fmt(in_t8),
-                "N hit": len(in_t8),
-            })
-        st.dataframe(pd.DataFrame(ses_tbl), use_container_width=True, hide_index=True)
-        st.markdown(f"**Top-8:** " + balls_html(top8_last, "nb-pool"), unsafe_allow_html=True)
-
-    with col_h:
-        # Heatmap 7×7
-        grid = np.zeros((7, 7))
-        for num2, cnt2 in num_in_ses_last.items():
-            r = (num2 - 1) // 7; cc2 = (num2 - 1) % 7
-            grid[r, cc2] = cnt2
-        labels_h = [[f"{r2*7+c2+1:02d}" for c2 in range(7)] for r2 in range(7)]
-        vals_h   = [[int(grid[r2, c2]) for c2 in range(7)] for r2 in range(7)]
-        fig_hm = go.Figure(go.Heatmap(
-            z=vals_h, text=labels_h, texttemplate="%{text}",
-            colorscale="YlOrRd", zmin=0, zmax=5, showscale=False,
-        ))
-        fig_hm.update_layout(
-            title="Freq. per numero (5 sestine)",
-            height=280, margin=dict(l=10, r=10, t=40, b=10),
-            plot_bgcolor="#0f1923", paper_bgcolor="#0f1923",
-            font=dict(color="#c0cfe0", size=10),
-            xaxis=dict(showticklabels=False), yaxis=dict(showticklabels=False, autorange="reversed"),
-        )
-        st.plotly_chart(fig_hm, use_container_width=True)
-
-    # ── Nucleo operativo ────────────────────────────────────────────────────────
-    st.subheader(f"🧭 Nucleo operativo  →  Draw #{next_draw}")
-    nuc_html = balls_html(nucleus_op, "nb-nucleo") if nucleus_op else balls_html(core_4plus[:5], "nb-nucleo")
-    pool_html = balls_html(top8_last, "nb-pool")
-
-    cn_a, cn_b = st.columns(2)
-    cn_a.markdown(
-        '<div class="card-box">'
-        '<div class="card-title">Top-8 (pool base)</div>'
-        + pool_html + "</div>",
-        unsafe_allow_html=True,
-    )
-    cn_b.markdown(
-        '<div class="card-box">'
-        '<div class="card-title">Nucleo (4-5 ses + top8â©3-ses)</div>'
-        + (nuc_html if nuc_html else "<i>—</i>") + "</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"**Previsione congelata** → monitorare su draw "
-        f"**#{next_draw}** · **#{next_draw+1}** · **#{next_draw+2}** · **#{next_draw+3}**"
-    )
-
-    # ── Copertura ────────────────────────────────────────────────────────────────
-    st.subheader("đź“ Copertura verso il 6")
-    cover_data = []
-    for fixed in range(3, 6):
-        remaining = 49 - fixed
-        missing   = 6 - fixed
-        for residui in [5, 8, 10, 12, 15]:
-            if residui <= remaining:
-                cover_data.append({
-                    "Nucleo fisso": fixed,
-                    "Da trovare": missing,
-                    "Residui": residui,
-                    "Sestine": comb(residui, missing),
-                    "Costo ~3 PLN": f"{comb(residui, missing) * 3} PLN",
-                })
-    df_cov = pd.DataFrame(cover_data)
-
-    def _style_cost(val):
-        try:
-            v = int(str(val).replace(" PLN", ""))
-            if v <= 90:  return "background-color:#1a3a1a; color:#a5d6a7; font-weight:bold"
-            if v <= 150: return "background-color:#3a2a00; color:#ffe082"
-            return ""
-        except (ValueError, TypeError):
-            return ""
-
-    try:
-        styled_cov = df_cov.style.map(_style_cost, subset=["Costo ~3 PLN"])
-    except AttributeError:
-        styled_cov = df_cov.style.applymap(_style_cost, subset=["Costo ~3 PLN"])
-
-    st.dataframe(styled_cov, use_container_width=True, hide_index=True)
-
-    # ── Casi storici quintina ────────────────────────────────────────────────────
-    st.subheader("🔬 Casi storici pool ≥ 5  —  Pattern nucleo")
-    q5c = lc_full[lc_full["best_pool_hit"] >= 5].copy()
-    if len(q5c) == 0:
-        st.info("Nessun caso pool ≥ 5.")
+    if range_df.empty:
+        st.warning("⏳ Semaforo non disponibile. Magic Lab deve ancora produrre i dati.")
     else:
-        with st.expander(f"{len(q5c)} casi pool ≥ 5 — clicca per espandere"):
-            for _, qr in q5c.iterrows():
-                idx_q  = int(qr["i"]); bt = int(qr["best_t_pool"])
-                actual_q = actuals[idx_q + bt] if (idx_q + bt) < N else frozenset()
-                pool_q   = pools[idx_q]
-                in_p     = pool_q & actual_q
-                miss_q   = actual_q - pool_q
-                fq = Counter()
-                for sq in ses_all[idx_q]:
-                    for nq in sq: fq[nq] += 1
-                hfq = sorted(n for n, c in fq.items() if c >= 4)
+        eventi = [">=3", ">=4", ">=5", "=6"]
+        labels = ["3 numeri", "4 numeri", "5 numeri", "6 numeri"]
+        cols = st.columns(4)
 
-                st.markdown(
-                    f"**#{int(qr['draw'])} → #{int(qr.get(f'draw_t{bt}', qr['draw']) or qr['draw'])}** "
-                    f"(T+{bt}) — "
-                    f"✅ `{fmt(in_p)}` — ❌ `{fmt(miss_q)}` — "
-                    f"🔥 4+ses: `{fmt(hfq) if hfq else '—'}` — "
-                    f"Reali in nucleo: `{fmt(actual_q & set(hfq)) if hfq else '—'}`"
-                )
+        for col, ev, lbl in zip(cols, eventi, labels):
+            with col:
+                st.markdown(f"**{lbl} ({ev})**")
+                sub = range_df[range_df["Evento"] == ev] if "Evento" in range_df.columns else pd.DataFrame()
+                if len(sub):
+                    sub = sub.copy()
+                    sub["_rank"] = sub["Azione"].map(AZIONE_ORDER).fillna(0)
+                    best = sub.sort_values("_rank", ascending=False).iloc[0]
+                    azione = str(best.get("Azione", "?")).lower()
+                    emoji, label, css_cls = AZIONE_EMOJI.get(azione, ("⚪", azione.upper(), "semaforo-rosso"))
 
-    # ── Registro T+k ────────────────────────────────────────────────────────────
-    st.subheader("Registro T+k")
-    st.caption("Aggiornato automaticamente quando backtest_ml_storico.xlsx viene aggiornato.")
-    mon_df = pd.DataFrame({
-        "Finestra":     [f"T+0  (#{next_draw})", f"T+1  (#{next_draw+1})",
-                         f"T+2  (#{next_draw+2})", f"T+3  (#{next_draw+3})"],
-        "Data":         ["—"] * 4,
-        "Numeri reali": ["—"] * 4,
-        "Pool hit":     ["—"] * 4,
-        "Best sestina": ["—"] * 4,
-    })
-    st.dataframe(mon_df, use_container_width=True, hide_index=True)
+                    st.markdown(f'<div class="{css_cls}">{emoji} {label}</div>', unsafe_allow_html=True)
+                    st.markdown(f"Gap attuale: **{best.get('Gap attuale', '?')}** draw")
+                    st.markdown(f"Gap medio: {best.get('Gap medio', '?')} draw")
+                    st.caption(f"Strategia: {best.get('Strategia', '?')}")
+                else:
+                    st.markdown("⚪ **DATI MANCANTI**")
 
+        st.markdown("---")
 
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# ║  TAB 4 — CONVERGENZE & PROBABILITÀ SPERIMENTALI                         ║
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•ť
+        with st.expander("Dettaglio cicli completo", expanded=False):
+            gaps_df = read_csv_safe(str(LAB_GAPS))
+            if not gaps_df.empty:
+                st.dataframe(gaps_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Dati cicli non disponibili.")
 
+# ─────────────────────────────── TAB 4: Stato ────────────────────────────────
 with tab4:
-    guide_box(
-        "Convergenze e probabilita sperimentali",
-        "Separare i segnali che sembrano reali dai segnali che sembrano rumore.",
-        "Confronta l'osservato con la baseline random e guarda se una condizione aumenta davvero gli eventi >=3 o >=4.",
-        "Le condizioni migliori diventano candidate per modificare App1 o App2; quelle deboli restano solo descrittive."
-    )
-    st.header("đź“ Convergenze & ProbabilitĂ  Sperimentali")
-    st.caption(
-        "Tutto calcolato su dati reali (500 walk-forward draw). Ogni numero "
-        "viene confrontato con la baseline random e mostra IC 95% (Wilson). "
-        "Niente promesse, solo evidenza."
-    )
+    st.subheader("Stato sistema Magic Dream")
 
-    from math import comb as _comb, sqrt as _sqrt
+    c1, c2, c3 = st.columns(3)
+    for col, port, name in [(c1, 8601, "App 1"), (c2, 8602, "App 2"), (c3, 8603, "App 3 (questa)")]:
+        ok = _health(port)
+        col.metric(name, "ONLINE" if ok else "OFFLINE", f"porta {port}")
 
-    # ── Helpers statistici ──────────────────────────────────────────────────────
-    def wilson_ci(k, n, z=1.96):
-        if n == 0:
-            return (0.0, 0.0)
-        p = k / n
-        denom = 1 + z * z / n
-        center = (p + z * z / (2 * n)) / denom
-        half = (z * _sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
-        return (max(0, center - half), min(1, center + half))
+    st.markdown("---")
 
-    def hypergeom_p(K, n, k):
-        if k < 0 or k > min(K, n) or K > 49 or n > 49:
-            return 0.0
-        return _comb(K, k) * _comb(49 - K, n - k) / _comb(49, n)
-
-    def hypergeom_ge(K, n, k):
-        return sum(hypergeom_p(K, n, j) for j in range(k, min(K, n) + 1))
-
-    def max_sestine_random_ge(k, m=5):
-        p_single_lt = 1 - hypergeom_ge(6, 6, k)
-        return 1 - p_single_lt ** m
-
-    # ─── 1. PROBABILITÀ BASE  (Sestina e Pool, T0 + lifecycle) ─────────────────
-    st.subheader("1. Probabilità sperimentali  vs  baseline random")
-
-    n_full = len(lc_full)
-
-    rows_prob = []
-    metrics = [
-        ("Sestina ≥ 3  (T0 secco)",  lc["ses_hit_t0"].dropna(),   3, max_sestine_random_ge(3)),
-        ("Sestina ≥ 4  (T0 secco)",  lc["ses_hit_t0"].dropna(),   4, max_sestine_random_ge(4)),
-        ("Sestina ≥ 5  (T0 secco)",  lc["ses_hit_t0"].dropna(),   5, max_sestine_random_ge(5)),
-        ("Sestina ≥ 3  (lifecycle T0–T3)",  lc_full["best_ses_hit"], 3, 1 - (1 - max_sestine_random_ge(3))**4),
-        ("Sestina ≥ 4  (lifecycle T0–T3)",  lc_full["best_ses_hit"], 4, 1 - (1 - max_sestine_random_ge(4))**4),
-        ("Pool ≥ 4  (lifecycle, pool=15)",  lc_full["best_pool_hit"], 4, 1 - (1 - hypergeom_ge(15, 6, 4))**4),
-        ("Pool ≥ 5  (lifecycle, pool=15)",  lc_full["best_pool_hit"], 5, 1 - (1 - hypergeom_ge(15, 6, 5))**4),
-        ("Pool = 6  (lifecycle, pool=15)",  lc_full["best_pool_hit"], 6, 1 - (1 - hypergeom_ge(15, 6, 6))**4),
-    ]
-    for lbl, series, k, baseline in metrics:
-        vals = series.values
-        n = len(vals)
-        hits = int((vals >= k).sum())
-        p = hits / n if n else 0
-        lo, hi = wilson_ci(hits, n)
-        lift = p - baseline
-        if lo > baseline:
-            signif = "✅"
-        elif hi < baseline:
-            signif = "⚠️"
+    # Magic Lab files
+    st.subheader("File Magic Lab")
+    if MAGIC_LAB_DIR.exists():
+        csvs = sorted(MAGIC_LAB_DIR.glob("*.csv"))
+        if csvs:
+            for f in csvs:
+                age_sec = time.time() - f.stat().st_mtime
+                age_str = f"{age_sec/60:.0f} min fa" if age_sec < 3600 else f"{age_sec/3600:.1f}h fa"
+                st.markdown(f"- `{f.name}` — {f.stat().st_size:,} bytes — {age_str}")
         else:
-            signif = "—"
-        rows_prob.append({
-            "Metrica": lbl,
-            "N": n,
-            "Eventi": hits,
-            "P sperimentale": f"{p*100:.2f}%",
-            "IC 95%": f"[{lo*100:.2f}%, {hi*100:.2f}%]",
-            "Baseline random": f"{baseline*100:.2f}%",
-            "Lift": f"{lift*100:+.2f}%",
-            "Significativo": signif,
-        })
-
-    st.dataframe(pd.DataFrame(rows_prob), use_container_width=True, hide_index=True)
-    st.caption(
-        "✅ = IC inferiore > baseline → meglio del caso al 95%. "
-        "⚠️ = IC superiore < baseline → peggio del caso. "
-        "— = indistinguibile dal caso."
-    )
-
-    # ─── 2. CURVA WALK-FORWARD — ROLLING MAX HIT ───────────────────────────────
-    st.subheader("2. Curva di apprendimento  (rolling Max Hit)")
-    st.caption("Il modello migliora o degrada nel tempo? Confronto con baseline random.")
-
-    s = lc["ses_hit_t0"].dropna().astype(float).reset_index(drop=True)
-    fig_roll = go.Figure()
-    for win, color in [(20, "#90caf9"), (50, "#42a5f5"), (100, "#1565c0")]:
-        if len(s) >= win:
-            roll = s.rolling(win, min_periods=win).mean()
-            fig_roll.add_trace(go.Scatter(
-                x=lc["draw"].iloc[:len(roll)], y=roll, mode="lines",
-                name=f"rolling {win}",
-                line=dict(color=color, width=2 if win == 50 else 1.5),
-            ))
-    exp_max = sum(k * (max_sestine_random_ge(k) - max_sestine_random_ge(k + 1)) for k in range(7))
-    fig_roll.add_hline(
-        y=exp_max, line_dash="dash", line_color="#e74c3c",
-        annotation_text=f"Baseline random ({exp_max:.3f})",
-        annotation_position="right",
-    )
-    fig_roll.update_layout(
-        xaxis_title="Draw #", yaxis_title="Max Hit medio (T0)",
-        height=360, margin=dict(l=40, r=20, t=20, b=40),
-        legend=dict(orientation="h", y=1.05),
-    )
-    st.plotly_chart(fig_roll, use_container_width=True)
-
-    cur_mean = float(s.tail(50).mean()) if len(s) >= 50 else float(s.mean())
-    delta = cur_mean - exp_max
-    cA, cB, cC = st.columns(3)
-    cA.metric("Media ultimi 50 draw", f"{cur_mean:.3f}")
-    cB.metric("Baseline random", f"{exp_max:.3f}")
-    cC.metric("Edge", f"{delta:+.3f}", delta=f"{delta/exp_max*100:+.1f}%" if exp_max else "—")
-
-    # ─── 3. SCATTER: CONSENSUS vs MAX HIT ──────────────────────────────────────
-    st.subheader("3. Consensus intensity  vs  Max Hit")
-    st.caption(
-        "X = quanti numeri stanno in 4-5 sestine in quella previsione. "
-        "Y = Max Hit realizzato. Se il modello 'sa quando è sicuro' → correlazione positiva."
-    )
-
-    cons_intensity = []
-    max_hits_t0 = []
-    for i in range(N):
-        s_list = ses_all[i]
-        cnt = Counter()
-        for ss in s_list:
-            for nu in ss:
-                cnt[nu] += 1
-        cons_intensity.append(sum(1 for v in cnt.values() if v >= 4))
-        v0 = lc.iloc[i].get("ses_hit_t0")
-        max_hits_t0.append(v0 if pd.notna(v0) else None)
-
-    df_scat = pd.DataFrame({
-        "consensus": cons_intensity,
-        "maxhit_t0": max_hits_t0,
-    }).dropna(subset=["maxhit_t0"])
-
-    cor_t0 = df_scat["consensus"].corr(df_scat["maxhit_t0"]) if len(df_scat) >= 2 else None
-    # Jitter manuale per separare punti sovrapposti
-    rng = np.random.default_rng(42)
-    df_scat = df_scat.copy()
-    df_scat["x_jit"] = df_scat["consensus"] + rng.uniform(-0.25, 0.25, len(df_scat))
-    df_scat["y_jit"] = df_scat["maxhit_t0"] + rng.uniform(-0.15, 0.15, len(df_scat))
-    fig_sc = px.scatter(
-        df_scat, x="x_jit", y="y_jit",
-        labels={"x_jit": "# numeri in 4-5 sestine", "y_jit": "Max Hit T0"},
-        color="maxhit_t0",
-        color_continuous_scale=["#5b86b3", "#90caf9", "#ffd54f", "#ff8a65", "#e53935"],
-        range_color=[0, 5],
-    )
-    fig_sc.update_traces(marker=dict(size=6, opacity=0.55))
-    if cor_t0 is not None:
-        fig_sc.add_annotation(
-            xref="paper", yref="paper", x=0.02, y=0.98,
-            text=f"<b>Correlazione Pearson: {cor_t0:.3f}</b>",
-            showarrow=False, bgcolor="#1e2a3a", bordercolor="#90caf9",
-            font=dict(color="#e8f0fe"),
-        )
-    fig_sc.update_layout(height=360, margin=dict(l=40, r=20, t=20, b=40), showlegend=False)
-    st.plotly_chart(fig_sc, use_container_width=True)
-
-    st.markdown("**P(Max Hit ≥ 3 | consensus intensity ≥ X)**")
-    base_rate_3 = (df_scat["maxhit_t0"] >= 3).mean()
-    cond_rows = []
-    for thr in range(0, 7):
-        sub = df_scat[df_scat["consensus"] >= thr]
-        n_s = len(sub)
-        if n_s < 10:
-            continue
-        hits3 = int((sub["maxhit_t0"] >= 3).sum())
-        p3 = hits3 / n_s
-        lo3, hi3 = wilson_ci(hits3, n_s)
-        cond_rows.append({
-            "Condizione": f"consensus ≥ {thr}",
-            "N": n_s,
-            "P(≥3)": f"{p3*100:.1f}%",
-            "IC 95%": f"[{lo3*100:.1f}%, {hi3*100:.1f}%]",
-            "vs Base": f"{(p3 - base_rate_3)*100:+.1f}%",
-        })
-    if cond_rows:
-        st.dataframe(pd.DataFrame(cond_rows), use_container_width=True, hide_index=True)
-
-    # ─── 4. CONVERGENZA TRA LE 5 SESTINE ───────────────────────────────────────
-    st.subheader("4. Convergenza interna delle 5 sestine  (Jaccard)")
-    st.caption(
-        "Jaccard medio fra coppie di sestine. Alto = sestine simili → modello deciso. "
-        "Basso = coprono aree diverse → modello incerto."
-    )
-
-    def jaccard(a, b):
-        u = len(a | b)
-        return len(a & b) / u if u else 0
-
-    jaccard_avg = []
-    pairs = [(a, b) for a in range(5) for b in range(a + 1, 5)]
-    for i in range(N):
-        s_list = ses_all[i]
-        if not pairs:
-            jaccard_avg.append(0)
-            continue
-        avg = sum(jaccard(s_list[a], s_list[b]) for a, b in pairs) / len(pairs)
-        jaccard_avg.append(avg)
-
-    df_jac = pd.DataFrame({
-        "draw": lc["draw"],
-        "jaccard": jaccard_avg,
-        "max_hit_t0": lc["ses_hit_t0"],
-    }).dropna(subset=["max_hit_t0"])
-
-    fig_jac = go.Figure()
-    fig_jac.add_trace(go.Scatter(
-        x=df_jac["draw"], y=df_jac["jaccard"], mode="lines",
-        line=dict(color="#90caf9", width=1), name="Jaccard medio",
-    ))
-    fig_jac.add_trace(go.Scatter(
-        x=df_jac["draw"], y=df_jac["jaccard"].rolling(30, min_periods=10).mean(),
-        mode="lines", line=dict(color="#1565c0", width=2.5), name="rolling 30",
-    ))
-    fig_jac.update_layout(
-        xaxis_title="Draw #", yaxis_title="Jaccard medio",
-        height=320, margin=dict(l=40, r=20, t=20, b=40),
-        legend=dict(orientation="h", y=1.05),
-    )
-    st.plotly_chart(fig_jac, use_container_width=True)
-
-    cor_j = df_jac["jaccard"].corr(df_jac["max_hit_t0"])
-    msg_j = ("Sicurezza interna NON correla con esito reale → non è un segnale predittivo."
-             if abs(cor_j) < 0.10
-             else "Esiste una correlazione misurabile fra sicurezza interna ed esito.")
-    st.info(f"**Correlazione Jaccard ↔ Max Hit T0: {cor_j:+.3f}**  →  {msg_j}")
-
-    # ─── 5. STABILITÀ DEL NUCLEO TEMPORALMENTE ─────────────────────────────────
-    st.subheader("5. Stabilità del nucleo tra previsioni consecutive")
-    st.caption("Quanto il nucleo (4-5 sestine) cambia da una previsione alla successiva.")
-
-    nuclei = []
-    for i in range(N):
-        cnt = Counter()
-        for ss in ses_all[i]:
-            for nu in ss:
-                cnt[nu] += 1
-        nuclei.append(frozenset(n for n, c in cnt.items() if c >= 4))
-
-    nucl_jac = []
-    for i in range(1, N):
-        u = len(nuclei[i] | nuclei[i - 1])
-        nucl_jac.append(len(nuclei[i] & nuclei[i - 1]) / u if u else 0)
-
-    fig_nuc = go.Figure()
-    fig_nuc.add_trace(go.Scatter(
-        x=lc["draw"][1:], y=nucl_jac, mode="lines",
-        line=dict(color="#7e57c2", width=1),
-        name="Jaccard nucleo n vs n-1",
-    ))
-    if len(nucl_jac) >= 30:
-        roll_nuc = pd.Series(nucl_jac).rolling(30, min_periods=10).mean()
-        fig_nuc.add_trace(go.Scatter(
-            x=lc["draw"][1:], y=roll_nuc, mode="lines",
-            line=dict(color="#311b92", width=2.5),
-            name="rolling 30",
-        ))
-    fig_nuc.update_layout(
-        xaxis_title="Draw #", yaxis_title="Jaccard",
-        height=320, margin=dict(l=40, r=20, t=20, b=40),
-        legend=dict(orientation="h", y=1.05),
-    )
-    st.plotly_chart(fig_nuc, use_container_width=True)
-
-    avg_nuc = float(np.mean(nucl_jac)) if nucl_jac else 0
-    st.info(
-        f"**Stabilità media nucleo: {avg_nuc:.3f}**  "
-        f"(0 = ogni previsione cambia tutto, 1 = mai cambia). "
-        f"Il modello rigenera in media ~{(1 - avg_nuc) * 100:.0f}% del nucleo ad ogni draw."
-    )
-
-    # ─── 6. HEATMAP CALENDARIO ─────────────────────────────────────────────────
-    st.subheader("6. Calendario  —  Quando esce ≥3?")
-    st.caption("Distribuzione temporale degli eventi sestina ≥ 3 (T0).")
-
-    try:
-        lc_dates = pd.to_datetime(lc["date"])
-        lc_with = pd.DataFrame({
-            "date": lc_dates,
-            "hit": lc["ses_hit_t0"].fillna(0),
-        }).dropna(subset=["date"])
-        lc_with["year"] = lc_with["date"].dt.year
-        lc_with["week"] = lc_with["date"].dt.isocalendar().week
-        lc_with["dow"] = lc_with["date"].dt.dayofweek
-
-        years = sorted(lc_with["year"].unique())
-        if years:
-            sel_year = st.selectbox("Anno", years, index=len(years) - 1, key="cal_year")
-            yr = lc_with[lc_with["year"] == sel_year]
-            pivot = yr.pivot_table(index="dow", columns="week", values="hit",
-                                   aggfunc="max", fill_value=0)
-            fig_cal = go.Figure(go.Heatmap(
-                z=pivot.values,
-                x=[f"W{w}" for w in pivot.columns],
-                y=["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"][:len(pivot)],
-                colorscale=[[0, "#1e2a3a"], [0.3, "#90caf9"], [0.6, "#ffd54f"], [0.8, "#ff8a65"], [1, "#e53935"]],
-                zmin=0, zmax=4,
-                showscale=True,
-                hovertemplate="%{x} %{y}<br>Max Hit: %{z}<extra></extra>",
-            ))
-            fig_cal.update_layout(height=260, margin=dict(l=40, r=20, t=20, b=40),
-                                  title=f"Max Hit T0 — Anno {sel_year}")
-            st.plotly_chart(fig_cal, use_container_width=True)
-    except Exception as _e:
-        st.caption(f"(Calendario non disponibile: {_e})")
-
-    # ─── 7. AUTO-DISCOVERY  (osservazione sperimentale pura) ───────────────────
-    st.subheader("7. Auto-discovery sperimentale  —  Quali condizioni hanno P(≥3) più alta?")
-    st.caption(
-        "Si testano K condizioni binarie e si misura P(Max Hit ≥ 3 | condizione). "
-        "Mostro IC Wilson 95% grezzo, niente correzioni teoriche. "
-        "Decidi tu cosa ti convince: quello che vedi è quello che ha fatto il dato."
-    )
-
-    base_rate = (lc["ses_hit_t0"].dropna() >= 3).mean()
-    cond_tests = []
-
-    rolling_mh = lc["ses_hit_t0"].rolling(10, min_periods=10).mean().shift(1)
-    rolling_5 = lc["ses_hit_t0"].rolling(5, min_periods=5).mean().shift(1)
-
-    gaps_since_3 = []
-    last_idx = -999
-    for i, v in enumerate(lc["ses_hit_t0"]):
-        gaps_since_3.append(i - last_idx if last_idx >= 0 else 999)
-        if pd.notna(v) and v >= 3:
-            last_idx = i
-    gaps_since_3 = np.array(gaps_since_3)
-
-    def add_cond(label, mask):
-        m = mask & lc["ses_hit_t0"].notna()
-        n_ = int(m.sum())
-        if n_ < 20:
-            return
-        hits = int((lc.loc[m, "ses_hit_t0"] >= 3).sum())
-        p = hits / n_
-        lo, hi = wilson_ci(hits, n_)
-        cond_tests.append({
-            "Condizione": label, "N": n_, "Hits": hits,
-            "P": p, "Lo": lo, "Hi": hi, "Lift": p - base_rate,
-        })
-
-    cons_series = pd.Series(cons_intensity, index=lc.index)
-    jac_series = pd.Series(jaccard_avg, index=lc.index)
-    gap3_series = pd.Series(gaps_since_3, index=lc.index)
-
-    add_cond("consensus_intensity ≥ 4", cons_series >= 4)
-    add_cond("consensus_intensity ≥ 5", cons_series >= 5)
-    add_cond("consensus_intensity ≤ 2", cons_series <= 2)
-    add_cond("jaccard_5sest ≥ 0.40", jac_series >= 0.40)
-    add_cond("jaccard_5sest ≤ 0.20", jac_series <= 0.20)
-    add_cond("rolling_10 ≥ 1.5", rolling_mh >= 1.5)
-    add_cond("rolling_10 ≤ 1.0", rolling_mh <= 1.0)
-    add_cond("rolling_5  ≥ 2.0", rolling_5 >= 2.0)
-    add_cond("gap_since_≥3 ≤ 2", gap3_series <= 2)
-    add_cond("gap_since_≥3 ≥ 10", gap3_series >= 10)
-    add_cond("pool_size ≥ 16", lc["pool_size"] >= 16)
-    add_cond("pool_size ≤ 14", lc["pool_size"] <= 14)
-
-    K = len(cond_tests)
-
-    rows_disc = []
-    n_above = 0
-    n_clearly_above = 0
-    for r in cond_tests:
-        if r["Lift"] > 0:
-            n_above += 1
-        # "chiaramente sopra" = IC inferiore Wilson 95% > base_rate
-        if r["Lo"] > base_rate:
-            n_clearly_above += 1
-            mark = "🔥"
-        elif r["Hi"] < base_rate:
-            mark = "🧊"  # chiaramente sotto
-        elif r["Lift"] > 0:
-            mark = "↑"
-        elif r["Lift"] < 0:
-            mark = "↓"
-        else:
-            mark = "—"
-        rows_disc.append({
-            "Condizione":   r["Condizione"],
-            "N":            r["N"],
-            "Hits ≥3":      r["Hits"],
-            "P osservata":  f"{r['P']*100:.1f}%",
-            "IC 95%":       f"[{r['Lo']*100:.1f}%, {r['Hi']*100:.1f}%]",
-            "Lift vs base": f"{r['Lift']*100:+.1f}%",
-            "Trend":        mark,
-        })
-
-    st.markdown(
-        f"**Base rate P(≥3) = {base_rate*100:.1f}%**  ·  "
-        f"Condizioni testate: **{K}**  ·  "
-        f"Sopra il base rate: **{n_above}/{K}**  ·  "
-        f"🔥 con IC che NON tocca la base: **{n_clearly_above}**"
-    )
-    df_disc = pd.DataFrame(rows_disc)
-    if "Lift vs base" in df_disc.columns:
-        df_disc = df_disc.assign(
-            _lift_num=df_disc["Lift vs base"].str.replace("%", "").str.replace("+", "").astype(float)
-        ).sort_values("_lift_num", ascending=False).drop(columns=["_lift_num"])
-    st.dataframe(df_disc, use_container_width=True, hide_index=True)
-
-    st.caption(
-        "🔥 = condizione con IC 95% interamente sopra il base rate "
-        "(probabilità osservata chiaramente più alta del normale) · "
-        "↑ = sopra il base rate ma IC sovrapposto · "
-        "↓ = sotto il base rate · "
-        "🧊 = IC interamente sotto il base rate."
-    )
-
-    if n_clearly_above == 0:
-        st.info(
-            "ℹ️ Nessuna condizione ha IC interamente sopra il base rate — "
-            "guarda comunque le 🔥 e le ↑: sono i punti più promettenti del dato. "
-            "Decidi tu se vale la pena esplorarli."
-        )
+            st.warning("Nessun CSV ancora prodotto da Magic Lab.")
     else:
-        st.success(
-            f"🔥 **{n_clearly_above} condizioni** hanno IC 95% interamente sopra il base rate. "
-            "Sono i candidati più solidi per essere regole reali."
-        )
+        st.error("Cartella `magic_lab/` non trovata.")
 
-    # ─── 8. ATTESA MEDIA TRA EVENTI ────────────────────────────────────────────
-    st.subheader("8. Quante estrazioni servono in media per arrivare a un evento?")
-    st.caption("Tempo medio di attesa fra eventi consecutivi della stessa intensità.")
+    st.markdown("---")
 
-    waits_rows = []
-    targets = [
-        (3, "Sestina ≥ 3 (T0)", "t0_ses"),
-        (4, "Sestina ≥ 4 (T0)", "t0_ses"),
-        (3, "Sestina ≥ 3 (lifecycle)", "lc_ses"),
-        (4, "Sestina ≥ 4 (lifecycle)", "lc_ses"),
-        (5, "Pool ≥ 5 (lifecycle)", "lc_pool"),
-    ]
-    for k_thresh, label, kind in targets:
-        if kind == "t0_ses":
-            ev_draws = lc.loc[lc["ses_hit_t0"] >= k_thresh, "draw"].values
-        elif kind == "lc_ses":
-            ev_draws = lc_full.loc[lc_full["best_ses_hit"] >= k_thresh, "draw"].values
-        else:
-            ev_draws = lc_full.loc[lc_full["best_pool_hit"] >= k_thresh, "draw"].values
-        if len(ev_draws) < 2:
-            continue
-        gaps = np.diff(ev_draws)
-        p_emp = 1 / np.mean(gaps) if np.mean(gaps) else 0
-        waits_rows.append({
-            "Evento": label,
-            "N eventi": len(ev_draws),
-            "Gap medio": f"{np.mean(gaps):.1f}",
-            "Gap mediano": f"{np.median(gaps):.0f}",
-            "Gap min": int(np.min(gaps)),
-            "Gap max": int(np.max(gaps)),
-            "P empirica/draw": f"{p_emp*100:.2f}%",
-            "Attesa media": f"~{np.mean(gaps):.0f} draw",
-        })
-    if waits_rows:
-        st.dataframe(pd.DataFrame(waits_rows), use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.caption(
-        "đź“ **Note metodologiche** Â· IC = Intervallo di Confidenza Wilson 95% (osservato) Â· "
-        "Baseline random = ipergeometrica (49 numeri, 6 estratti, 5 sestine indipendenti) · "
-        "Tutti i calcoli sono deterministici da `backtest_ml_storico.xlsx`. "
-        "Niente correzioni teoriche: vedi il dato così com'è."
-    )
-with tab5:
-    guide_box(
-        "Confronto strategie",
-        "Mettere affiancati vecchio metodo, Magic Precision e segnali App2 per decidere cosa migliorare.",
-        "Leggi prima il delta medio e poi gli eventi forti: una strategia e' interessante se migliora senza allargare troppo il pool.",
-        "Usa il box Assistente Magic nella sidebar per chiedere una modifica mirata su App1, App2 o App3."
-    )
-    st.success(
-        "Magic Lab e' integrato nell'avvio 24/7: quando lanci 'Avvia Magic Dream 24-7.bat', "
-        "il laboratorio gira in background e aggiorna questi risultati in `magic_lab`."
-    )
-
-    st.subheader("Quadro semplice")
-    base_avg = float(lc_full["best_ses_hit"].mean()) if len(lc_full) else 0.0
-    base_pool_avg = float(lc_full["best_pool_hit"].mean()) if len(lc_full) else 0.0
-    has_magic_data = "best_magic_ses_hit" in lc_full.columns and int(lc_full["best_magic_pool_hit"].max()) > 0
-
-    rows_cmp = [
-        {
-            "Strategia": "App1 originale",
-            "Best sestina media": round(base_avg, 3),
-            "Best pool medio": round(base_pool_avg, 3),
-            "Eventi sestina >=3": int((lc_full["best_ses_hit"] >= 3).sum()),
-            "Eventi pool >=5": int((lc_full["best_pool_hit"] >= 5).sum()),
-            "Lettura": "Base storica",
-        }
-    ]
-    if has_magic_data:
-        magic_avg = float(lc_full["best_magic_ses_hit"].mean())
-        magic_pool_avg = float(lc_full["best_magic_pool_hit"].mean())
-        rows_cmp.append({
-            "Strategia": "Magic Precision",
-            "Best sestina media": round(magic_avg, 3),
-            "Best pool medio": round(magic_pool_avg, 3),
-            "Eventi sestina >=3": int((lc_full["best_magic_ses_hit"] >= 3).sum()),
-            "Eventi pool >=5": int((lc_full["best_magic_pool_hit"] >= 5).sum()),
-            "Lettura": "Da preferire se migliora hit senza gonfiare il pool",
-        })
+    # Backtest
+    st.subheader("File backtest (facoltativo)")
+    if BACKTEST_PATH.exists():
+        st.success(f"✅ Trovato: `{BACKTEST_PATH.name}`")
     else:
         st.warning(
-            "Magic Precision non e' ancora presente nello storico. "
-            "Vai in App1 e rigenera/estendi il backtest per popolare le colonne Magic."
+            f"⚠️ Backtest non trovato: `{BACKTEST_PATH}`\n\n"
+            "Per abilitare le analisi avanzate copia:\n"
+            "- `backtest_ml_storico.xlsx`\n"
+            "- `lotto_draws.csv`\n\n"
+            f"Nella cartella: `{DASHBOARD_DIR}`"
         )
-    if APP2_SUMMARY_PATH.exists():
-        try:
-            app2_summary = pd.read_csv(APP2_SUMMARY_PATH).iloc[-1]
-            rows_cmp.append({
-                "Strategia": f"App2 ({app2_summary.get('Agente', 'best')})",
-                "Best sestina media": app2_summary.get("Hit medi", "-"),
-                "Best pool medio": "-",
-                "Eventi sestina >=3": "-",
-                "Eventi pool >=5": "-",
-                "Lettura": f"Delta vs App1 {app2_summary.get('Delta vs App1', '-')}",
-            })
-        except Exception:
-            st.warning("Riepilogo App2 trovato ma non leggibile. Riesegui Ensemble in App2.")
-    else:
-        st.info("App2 non ha ancora salvato un riepilogo. Apri App2 e premi 'Esegui Ensemble' per popolare questa riga.")
-    if MAGIC_LAB_RANKING_PATH.exists():
-        try:
-            lab_best = pd.read_csv(MAGIC_LAB_RANKING_PATH).iloc[0]
-            rows_cmp.append({
-                "Strategia": f"Magic Lab ({lab_best.get('Strategia', 'best')})",
-                "Best sestina media": lab_best.get("Hit medio", "-"),
-                "Best pool medio": "-",
-                "Eventi sestina >=3": lab_best.get("Hit >=3", "-"),
-                "Eventi pool >=5": "-",
-                "Lettura": f"Simulato su {lab_best.get('Draw valutati', '-')} draw",
-            })
-        except Exception:
-            st.warning("Ranking Magic Lab trovato ma non leggibile. Riesegui Magic Lab.")
-    else:
-        st.info("Magic Lab non ha ancora risultati. Avvia 'Avvia Magic Lab - simulazione una volta.bat'.")
 
-    st.dataframe(pd.DataFrame(rows_cmp), use_container_width=True, hide_index=True)
+    st.markdown("---")
 
-    if MAGIC_LAB_NEXT_PATH.exists():
-        st.subheader("Predizioni candidate Magic Lab")
-        try:
-            st.dataframe(pd.read_csv(MAGIC_LAB_NEXT_PATH), use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Predizioni Magic Lab non leggibili. Riesegui Magic Lab.")
-
-    if MAGIC_LAB_CYCLE_SUMMARY_PATH.exists():
-        st.subheader("Cicli Magic Lab: ogni quanto arrivano 3, 4, 5, 6")
-        st.caption(
-            "Qui non guardiamo solo la media: per ogni strategia misuriamo fase calda/fredda e gap degli eventi "
-            "con hit >=3, >=4, >=5 e =6."
-        )
-        try:
-            cyc = pd.read_csv(MAGIC_LAB_CYCLE_SUMMARY_PATH)
-            st.dataframe(cyc, use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Riepilogo cicli Magic Lab non leggibile. Riesegui Magic Lab.")
-
-    if MAGIC_LAB_CYCLE_WINDOWS_PATH.exists():
-        with st.expander("Dettaglio cicli storici per finestre da 250 draw", expanded=False):
+    # Log
+    if LOG_PATH.exists():
+        with st.expander("Log Magic Dream 24/7 (ultime 30 righe)", expanded=False):
             try:
-                win = pd.read_csv(MAGIC_LAB_CYCLE_WINDOWS_PATH)
-                st.dataframe(win, use_container_width=True, hide_index=True)
-            except Exception:
-                st.warning("Dettaglio finestre cicliche non leggibile.")
-
-    if MAGIC_LAB_EVENT_GAPS_PATH.exists():
-        with st.expander("Ogni quanto: gap eventi Magic Lab 3/4/5/6", expanded=False):
-            try:
-                gaps = pd.read_csv(MAGIC_LAB_EVENT_GAPS_PATH)
-                st.dataframe(gaps, use_container_width=True, hide_index=True)
-            except Exception:
-                st.warning("Gap eventi Magic Lab non leggibile.")
-
-    if MAGIC_LAB_RANGE_POSITIONS_PATH.exists():
-        st.subheader("Come mettersi nel range")
-        st.caption(
-            "Posizione ciclo = gap attuale / gap medio. "
-            "Presto: non inseguire. Avvicinamento: preparare. Range maturo: attivare. "
-            "In ritardo: monitorare forte, ma senza forzare eventi rarissimi."
-        )
-        try:
-            pos = pd.read_csv(MAGIC_LAB_RANGE_POSITIONS_PATH)
-            st.dataframe(pos, use_container_width=True, hide_index=True)
-        except Exception:
-            st.warning("Posizionamento range Magic Lab non leggibile. Riesegui Magic Lab.")
-
-    st.subheader("Prossime modifiche consigliate")
-    st.markdown(
-        "- Se Magic Precision batte App1: portare i suoi segnali dentro App2 come agente dedicato.\n"
-        "- Se Magic Precision perde ma il pool prende molto: stringere la selezione sestine, non il radar.\n"
-        "- Se App1 e Magic sono simili: lavorare sulle condizioni di timing in App3.\n"
-        "- Se i grafici sono troppi: chiedi nella sidebar una versione compatta della tab."
-    )
-
-    st.text_area(
-        "Richiesta pronta per Codex",
-        assistant_prompt(
-            "Confronto strategie",
-            "leggere questa tab, confrontare App1 originale e Magic Precision, poi proporre la prossima modifica sperimentale"
-        ),
-        height=130,
-        key="tab5_prompt_ready",
-    )
-
-
+                log_lines = LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()[-30:]
+                st.code("\n".join(log_lines), language="text")
+            except Exception as e:
+                st.warning(f"Log non leggibile: {e}")
+    else:
+        st.info("Log 24/7 non ancora creato (avvia Magic Dream 24/7).")
