@@ -6,6 +6,7 @@ Non richiede backtest per avviarsi.
 
 import time
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -54,6 +55,7 @@ st.markdown("""
 .c4 { background: #16a34a; }
 .c5 { background: #7c3aed; }
 .c6 { background: #0891b2; }
+.c7 { background: #059669; border: 3px solid #fbbf24; }
 
 .semaforo-verde  { color: #16a34a; font-size: 2rem; font-weight: 700; }
 .semaforo-blu    { color: #1d4ed8; font-size: 2rem; font-weight: 700; }
@@ -71,6 +73,7 @@ STRATEGY_COLORS = {
     "Decade8":     "c4",
     "Delay8":      "c5",
     "NucleoPool":  "c6",
+    "Consensus8":  "c7",
 }
 
 AZIONE_EMOJI = {
@@ -172,34 +175,48 @@ with tab1:
             "Il primo calcolo richiede 3-5 minuti."
         )
     else:
-        # Highlight best strategy
         best_row = rank_df.iloc[0]
         best_name = str(best_row.get("Strategia", "?"))
-        best_hit3 = int(best_row.get("Hit >=3", 0))
-        best_medio = float(best_row.get("Hit medio", 0))
         draw_n = int(best_row.get("Draw valutati", 0))
-        benchmark = 0.028  # 2.8% random
 
-        st.success(f"**Strategia migliore: {best_name}** — {best_hit3} volte con 3+ numeri su {draw_n} draw testati")
+        # Prefer T0 metrics if available (honest: play once for next draw)
+        has_t0 = "Hit >=3 T0" in rank_df.columns
+        if has_t0:
+            best_hit3 = int(best_row.get("Hit >=3 T0", 0))
+            best_medio = float(best_row.get("Hit medio T0", 0))
+            best_pct = str(best_row.get("Hit >=3 T0 %", "?"))
+            st.success(f"**Strategia migliore: {best_name}** — {best_pct} delle volte indovina 3+ numeri al draw T+0 (prossima estrazione)")
+        else:
+            best_hit3 = int(best_row.get("Hit >=3", 0))
+            best_medio = float(best_row.get("Hit medio", 0))
+            pct = best_hit3 / draw_n * 100 if draw_n else 0
+            st.success(f"**Strategia migliore: {best_name}** — {pct:.1f}% su {draw_n} draw testati")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Strategia top", best_name)
-        c2.metric("Hit medio", f"{best_medio:.3f}")
-        pct = best_hit3 / draw_n * 100 if draw_n else 0
-        c3.metric("Hit >=3 (%)", f"{pct:.1f}%", delta=f"+{pct - 2.8:.1f}% vs random")
+        c2.metric("Hit medio T0", f"{best_medio:.3f}")
+        pct_val = best_hit3 / draw_n * 100 if draw_n else 0
+        c3.metric("Hit >=3 prossima draw", f"{pct_val:.1f}%", delta=f"+{pct_val - 2.8:.1f}% vs random")
         c4.metric("Draw testati", draw_n)
 
         st.markdown("---")
 
-        # Full table with color coding
-        cols_show = [c for c in [
-            "Rank", "Strategia", "Draw valutati",
-            "Hit medio", "Hit >=2", "Hit >=3", "Hit >=4", "Max Hit"
+        # T0 columns first (honest metric), then best_hit columns
+        t0_cols = [c for c in ["Rank", "Strategia", "Draw valutati",
+                               "Hit medio T0", "Hit >=3 T0", "Hit >=3 T0 %", "Hit >=4 T0"] if c in rank_df.columns]
+        best_cols = [c for c in ["Hit medio", "Hit >=3", "Hit >=4", "Max Hit"] if c in rank_df.columns]
+        cols_show = t0_cols + best_cols if t0_cols else [c for c in [
+            "Rank", "Strategia", "Draw valutati", "Hit medio", "Hit >=2", "Hit >=3", "Hit >=4", "Max Hit"
         ] if c in rank_df.columns]
 
         st.dataframe(rank_df[cols_show], use_container_width=True, hide_index=True)
 
-        st.caption(f"Benchmark casuale: ~2.8% hit rate (3+ su 8 numeri da 1-49)")
+        st.caption(
+            "**T0** = prossima estrazione (metrica onesta). "
+            "**Hit medio** = miglior risultato tra le 4 draw successive. "
+            "Benchmark casuale: ~2.8% (3+ su 8 numeri da 1-49). "
+            "**Consensus8** = voto di tutte le strategie insieme."
+        )
 
 # ─────────────────────────────── TAB 2: Previsioni ───────────────────────────
 with tab2:
@@ -220,12 +237,35 @@ with tab2:
         pred_col  = "Predizione" if "Predizione" in next_df.columns else None
 
         if strat_col and pred_col:
+            # Find Consensus8 prediction to highlight
+            consensus_nums: set = set()
+            for _, row in next_df.iterrows():
+                if str(row[strat_col]) == "Consensus8":
+                    consensus_nums = set(int(x) for x in str(row[pred_col]).split() if x.strip().isdigit())
+
+            # Count how many strategies pick each number
+            vote_count: Counter = Counter()
+            for _, row in next_df.iterrows():
+                if str(row[strat_col]) != "Consensus8":
+                    for x in str(row[pred_col]).split():
+                        if x.strip().isdigit():
+                            vote_count[int(x)] += 1
+
+            # Show consensus / "play these" box first
+            if consensus_nums:
+                st.markdown("### 🎯 Gioca questi — Consensus8")
+                st.markdown(
+                    "Numeri scelti da **tutte le strategie insieme** (voto di maggioranza):",
+                )
+                st.markdown(balls_html(" ".join(str(n) for n in consensus_nums), "c7"), unsafe_allow_html=True)
+                st.markdown("---")
+
+            # Show all strategies
+            st.markdown("### Tutte le strategie")
             for _, row in next_df.iterrows():
                 strat = str(row[strat_col])
                 pred  = str(row[pred_col])
                 css   = STRATEGY_COLORS.get(strat, "c6")
-                nums  = [int(x) for x in pred.split() if x.strip().isdigit()]
-
                 with st.container():
                     col1, col2 = st.columns([1, 4])
                     col1.markdown(f"**{strat}**")
@@ -235,12 +275,13 @@ with tab2:
 
         st.markdown("---")
         st.caption(
-            "**FreqHot8** = caldi (escono spesso) | "
-            "**FreqCold8** = freddi (in ritardo) | "
+            "**FreqHot8** = caldi | "
+            "**FreqCold8** = freddi | "
             "**HotCold4+4** = mix | "
-            "**Decade8** = decadi bilanciate | "
-            "**Delay8** = ritardo massimo | "
-            "**NucleoPool** = co-occorrenze"
+            "**Decade8** = decadi | "
+            "**Delay8** = massimo ritardo | "
+            "**NucleoPool** = co-occorrenze | "
+            "**Consensus8** = voto di tutte le strategie"
         )
 
 # ─────────────────────────────── TAB 3: Semaforo ─────────────────────────────

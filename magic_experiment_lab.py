@@ -75,6 +75,7 @@ STRATEGY_NAMES = [
     "Decade8",
     "Delay8",
     "NucleoPool",
+    "Consensus8",
 ]
 
 # ── Data helpers ─────────────────────────────────────────────────────────────
@@ -254,6 +255,28 @@ def strategy_nucleo_pool(
     return nucleo | frozenset(cold_fill)
 
 
+def strategy_consensus(history: List[frozenset], n: int = 8, window: int = 100) -> frozenset:
+    """
+    Vote across all 5 data-driven strategies.
+    Each number gets 1 vote per strategy that selects it.
+    Top-n numbers by vote count win; ties broken by recent frequency.
+    """
+    votes: Counter = Counter()
+    for cands in [
+        strategy_freq_hot(history, n=n, window=window),
+        strategy_freq_cold(history, n=n, window=window),
+        strategy_hot_cold(history, n=n, window=window),
+        strategy_decade(history, n=n, window=window),
+        strategy_delay(history, n=n),
+    ]:
+        for num in cands:
+            votes[num] += 1
+    recent = history[-window:] if len(history) >= window else history
+    freq = Counter(num for draw in recent for num in draw)
+    top = sorted(ALL_NUMS, key=lambda x: (-votes.get(x, 0), -freq.get(x, 0), x))[:n]
+    return frozenset(top)
+
+
 def _apply_strategy(
     name: str,
     history: List[frozenset],
@@ -272,6 +295,8 @@ def _apply_strategy(
         return strategy_delay(history)
     if name == "NucleoPool":
         return strategy_nucleo_pool(history, ses_history, window=freq_window)
+    if name == "Consensus8":
+        return strategy_consensus(history, window=freq_window)
     raise ValueError(f"Strategia sconosciuta: {name}")
 
 
@@ -384,7 +409,7 @@ def generate_next_predictions(
 def compute_event_gaps(bt: pd.DataFrame, thresholds: list = None) -> pd.DataFrame:
     """For each strategy and threshold, compute gaps between events (best_hit >= thr)."""
     if thresholds is None:
-        thresholds = [3, 4, 5]
+        thresholds = [3, 4, 5, 6]
 
     rows = []
     for sname in STRATEGY_NAMES:
@@ -475,10 +500,17 @@ def compute_cycle_summary(bt: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if len(df_s) == 0:
             continue
         valid = df_s[df_s["hit_t0"].notna()]
+        n_valid = len(valid)
+        t0_hits3 = int((valid["hit_t0"] >= 3).sum()) if n_valid else 0
+        t0_hits4 = int((valid["hit_t0"] >= 4).sum()) if n_valid else 0
         row = {
             "Rank": 0,
             "Strategia": sname,
-            "Draw valutati": len(valid),
+            "Draw valutati": n_valid,
+            "Hit medio T0": round(float(valid["hit_t0"].mean()), 3) if n_valid else 0,
+            "Hit >=3 T0": t0_hits3,
+            "Hit >=3 T0 %": f"{t0_hits3/n_valid*100:.1f}%" if n_valid else "0%",
+            "Hit >=4 T0": t0_hits4,
             "Hit medio": round(float(df_s["best_hit"].mean()), 3),
             "Hit >=2": int((df_s["best_hit"] >= 2).sum()),
             "Hit >=3": int((df_s["best_hit"] >= 3).sum()),
@@ -489,8 +521,8 @@ def compute_cycle_summary(bt: dict[str, pd.DataFrame]) -> pd.DataFrame:
         }
         rows.append(row)
     df_sum = pd.DataFrame(rows)
-    # Rank by Hit >=3 desc, then Hit medio desc
-    df_sum = df_sum.sort_values(["Hit >=3", "Hit medio"], ascending=False).reset_index(drop=True)
+    # Rank by T0 Hit>=3 desc, then T0 hit medio desc
+    df_sum = df_sum.sort_values(["Hit >=3 T0", "Hit medio T0"], ascending=False).reset_index(drop=True)
     df_sum["Rank"] = range(1, len(df_sum) + 1)
     return df_sum
 
