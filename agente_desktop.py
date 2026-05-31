@@ -7,6 +7,7 @@ Nessun browser necessario.
 """
 from __future__ import annotations
 
+import ast
 import os
 import queue
 import shutil
@@ -27,14 +28,17 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic"])
     print("anthropic installata.")
 
-from tkinter import font as tkfont
 import tkinter as tk
-from tkinter import scrolledtext, simpledialog, ttk
+from tkinter import font as tkfont  # noqa: F401
+from tkinter import scrolledtext
 
 ROOT_DIR = Path(__file__).resolve().parent
 LOG_PATH = ROOT_DIR / "magic_dream_24_7.log"
 MAGIC_LAB_DIR = ROOT_DIR / "magic_lab"
 API_KEY_FILE = ROOT_DIR / "anthropic_api_key.txt"
+WORKER_FILE = ROOT_DIR / "magic_experiment_lab.py"
+WORKER_BACKUP = ROOT_DIR / "magic_experiment_lab_backup.py"
+LAST_ANALYSIS_FILE = MAGIC_LAB_DIR / "last_analysis.txt"
 
 GITHUB_BASE = (
     "https://raw.githubusercontent.com/Cigolone84/"
@@ -52,60 +56,80 @@ GITHUB_FILES = [
 
 PORTS = {"App 1": 8601, "App 2": 8602, "App 3": 8603}
 
-MONITOR_INTERVAL = 300   # 5 minuti tra un check salute app
-ANALYSIS_INTERVAL = 21600  # 6 ore tra un'analisi autonoma e l'altra
-STARTUP_DELAY = 10       # secondi prima del primo check automatico
+MONITOR_INTERVAL = 300    # 5 minuti tra un check e l'altro
+STARTUP_DELAY = 10        # secondi prima del primo check automatico
+IMPROVE_INTERVAL = 21600  # 6 ore tra cicli di miglioramento automatici
+
+# Whitelist per read_source_code
+SOURCE_WHITELIST = [
+    "magic_experiment_lab.py",
+    "app3-lifecycle/app3.py",
+]
 
 SYSTEM_PROMPT = (
-"""Sei l'agente AI autonomo di Magic Dream. Conosci TUTTO il sistema.
-
-=== DUE SISTEMI DISTINTI SUL PC ===
-
-1. LOTTO ORIGINALE (cartella lotto sul Desktop):
-   - È il sistema ORIGINALE con 3 app Streamlit (porte 8501/8502/8503 o simili)
-   - Contiene: backtest_ml_storico.xlsx (storico estrazioni con ML walk-forward su 500 draw)
-   - Contiene: lotto_draws.csv (tutte le estrazioni storiche)
-   - Ha un pool di numeri candidati basato su frequenze e ML classico
-   - Fa previsioni ma con strategie standard
-
-2. MAGIC DREAM (cartella Magic Dream sul Desktop = """ + str(ROOT_DIR) + """):
-   - È una EVOLUZIONE del lotto originale, NON una semplice copia
-   - Porte: App1=8601, App2=8602, App3=8603
-   - OBIETTIVO: usare strategie DIVERSE e MIGLIORI rispetto al lotto originale
-   - Invece di usare solo il pool classico, usa 6 strategie indipendenti:
-     * FreqHot8: 8 numeri più frequenti nell'ultima finestra
-     * FreqCold8: 8 numeri meno frequenti (teoria del recupero)
-     * HotCold4+4: 4 caldi + 4 freddi
-     * Decade8: analisi per decade (1-9, 10-19, ... 80-90)
-     * Delay8: 8 numeri con più alto ritardo (teoria maturazione)
-     * NucleoPool: numeri che co-appaiono spesso insieme
-   - Magic Lab (magic_experiment_lab.py) gira in background e genera CSV in magic_lab/
-   - App3 (8603) mostra il "Centro Operativo": semaforo, ranking strategie, previsioni
-
-=== DATI SUL PC ===
-I file sorgente si trovano automaticamente in:
-- C:\\Users\\serti\\OneDrive\\Desktop\\lotto\\lotto-dashboard\\backtest_ml_storico.xlsx
-- C:\\Users\\serti\\OneDrive\\Desktop\\lotto\\lotto-dashboard\\lotto_draws.csv
-- Oppure: C:\\Users\\serti\\OneDrive\\Desktop\\3 ml\\lotto-dashboard\\
-- Magic Dream li copia in: """ + str(ROOT_DIR) + """\\app1-app2-dashboard\\lotto-dashboard\\
-
-=== LOTTO ITALIANO ===
-- 90 numeri (1-90), 5 estratti per ruota, 10 ruote + Nazionale
-- Estratto=1, Ambo=2, Terno=3, Quaterna=4, Cinquina=5
-- Ritardo = quante estrazioni fa che un numero non esce
-- Frequenza = quante volte è uscito negli ultimi N draw
-- Hit rate target: >10% (prob. random = 2.8% per 3+ match su 8 numeri)
-
-=== IL TUO RUOLO ===
-Tu sei il tramite intelligente tra l'utente e i sistemi AI.
-- Monitora le app ogni 5 minuti
-- Leggi i CSV di Magic Lab e interpreta i risultati
-- Usa le tue conoscenze per analizzare le strategie
-- Proponi miglioramenti concreti al codice
-- Riferisci all'utente SOLO i risultati finali, mai i dettagli tecnici
-- Parla SEMPRE in italiano, messaggi brevi e diretti
-- Agisci in autonomia, chiedi conferma SOLO prima di modificare file Python""")
-
+    "Sei l'agente AI autonomo di Magic Dream — sistema di analisi statistica del lotto italiano"
+    " (Superenalotto / lotto 90 numeri).\n\n"
+    "=== STRUTTURA MAGIC DREAM ===\n"
+    f"Cartella principale: {ROOT_DIR}\n"
+    "- magic_dream_24_7.py: supervisor che mantiene App1+App2+App3 sempre attive\n"
+    "- magic_experiment_lab.py: worker background che genera previsioni (6 strategie)\n"
+    "- setup_magic_dream.py: copia file lotto e installa App3\n"
+    "- app3-lifecycle/app3.py: App3 Magic Dream (la dashboard principale)\n"
+    "- app1-app2-dashboard/lotto-dashboard/app.py: App1 dashboard lotto\n"
+    "- app1-app2-dashboard/lotto-dashboard/app2.py: App2 dashboard lotto\n"
+    "- magic_lab/: cartella output del worker (CSV con previsioni)\n"
+    "- anthropic_api_key.txt: chiave API\n\n"
+    "=== PORTE ===\n"
+    "- App1 (localhost:8601): dashboard lotto principale, pool candidati, previsioni ML\n"
+    "- App2 (localhost:8602): dashboard lotto secondaria, analisi backtest\n"
+    "- App3 (localhost:8603): Magic Dream Centro Operativo — lifecycle, strategie, Magic Lab\n\n"
+    "=== LOTTO ITALIANO — REGOLE BASE ===\n"
+    "- 90 numeri (1-90), si estraggono 5 per ruota\n"
+    "- 10 ruote: Bari, Cagliari, Firenze, Genova, Milano, Napoli, Palermo, Roma, Torino,"
+    " Venezia + Nazionale\n"
+    "- Estratto: 1 numero, Ambo: 2, Terno: 3, Quaterna: 4, Cinquina: 5\n"
+    "- Frequenze: ogni numero ha un ciclo storico di uscite e ritardi\n"
+    "- Ritardo: quante estrazioni fa da quando un numero non esce"
+    " (numero \"in ritardo\" = potenzialmente \"maturo\")\n\n"
+    "=== STRATEGIE MAGIC DREAM (6 strategie in magic_experiment_lab.py) ===\n"
+    "1. FreqHot8: i 8 numeri piu frequenti nell'ultima finestra di N draw\n"
+    "2. FreqCold8: i 8 numeri meno frequenti (teoria del recupero)\n"
+    "3. HotCold4+4: mix 4 caldi + 4 freddi\n"
+    "4. Decade8: analisi per decade (1-9, 10-19, ... 80-90) — copre le decadi piu attive\n"
+    "5. Delay8: i 8 numeri con piu alto ritardo attuale (teoria della maturazione)\n"
+    "6. NucleoPool: nucleo di numeri che co-appaiono frequentemente insieme\n\n"
+    "=== OUTPUT MAGIC LAB (magic_lab/) ===\n"
+    "- latest_strategy_ranking.csv: ranking delle 6 strategie per hit rate"
+    " (colonne: strategy, hit_3plus, hit_rate, total_events)\n"
+    "- latest_next_predictions.csv: i numeri previsti per il prossimo draw (per strategia)\n"
+    "- latest_event_gaps.csv: gaps tra eventi significativi (usato per semaforo)\n"
+    "- latest_range_positions.csv: posizione di ogni numero nel suo range storico\n"
+    "- latest_cycle_summary.csv: riassunto cicli lifecycle\n"
+    "- latest_cycle_windows.csv: finestre temporali dei cicli\n\n"
+    "=== SEMAFORO IN APP3 ===\n"
+    "- Verde (attivare): gap >= 75 percentile — momento ottimale per puntare\n"
+    "- Blu (monitorare forte): gap >= mediana\n"
+    "- Giallo (preparare): gap >= 25 percentile\n"
+    "- Rosso (non inseguire): gap basso — ciclo non maturo\n\n"
+    "=== BACKTEST ===\n"
+    "File: app1-app2-dashboard/lotto-dashboard/backtest_ml_storico.xlsx\n"
+    "- Walk-forward su 500 draw storici (no data leakage)\n"
+    "- Metrica principale: hit rate >= 3 numeri su 8 selezionati\n"
+    "- Benchmark random: ~2.8% (prob casuale di 3+ match da 8 su 90)\n"
+    "- Target realistico: >10% hit rate per essere utile\n\n"
+    "=== TUOI COMPITI AUTONOMI ===\n"
+    "1. Monitora le 3 app ogni 5 minuti — se offline, avvisa e diagnoza\n"
+    "2. Leggi i CSV di Magic Lab e interpreta i risultati\n"
+    "3. Quando hai dati sufficienti, analizza le performance delle strategie\n"
+    "4. Suggerisci miglioramenti al codice (magic_experiment_lab.py)\n"
+    "5. Riferisci all'utente solo i risultati finali, non i dettagli tecnici\n\n"
+    "=== COMPORTAMENTO ===\n"
+    "- Parla SEMPRE in italiano\n"
+    "- Messaggi brevi e diretti — l'utente vuole fatti, non spiegazioni\n"
+    "- Agisci prima, riferisci dopo\n"
+    "- Non chiedere conferma per azioni di monitoraggio/lettura\n"
+    "- Chiedi conferma solo prima di modificare file Python\n"
+)
 
 TOOLS = [
     {
@@ -119,7 +143,10 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "lines": {"type": "integer", "description": "Righe da leggere (default 30)"}
+                "lines": {
+                    "type": "integer",
+                    "description": "Righe da leggere (default 30)",
+                }
             },
             "required": [],
         },
@@ -130,7 +157,10 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "Nome file CSV (opzionale)"}
+                "file": {
+                    "type": "string",
+                    "description": "Nome file CSV (opzionale)",
+                }
             },
             "required": [],
         },
@@ -151,14 +181,35 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "app": {"type": "string", "enum": ["App 1", "App 2", "App 3"]}
+                "app": {"type": "string", "enum": ["App 1", "App 2", "App 3"]},
             },
             "required": ["app"],
         },
     },
     {
+        "name": "read_source_code",
+        "description": (
+            "Legge il codice sorgente di un file Python di Magic Dream. "
+            "File ammessi: magic_experiment_lab.py, app3-lifecycle/app3.py"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Percorso relativo del file da leggere. "
+                        "Valori ammessi: 'magic_experiment_lab.py' "
+                        "oppure 'app3-lifecycle/app3.py'"
+                    ),
+                }
+            },
+            "required": ["filename"],
+        },
+    },
+    {
         "name": "list_folder",
-        "description": "Elenca il contenuto di una cartella sul PC. Usa per esplorare Desktop, Magic Dream, cartella lotto, ecc.",
+        "description": "Elenca il contenuto di una cartella sul PC. Usa per esplorare Desktop, cartella lotto, Magic Dream, ecc.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -169,19 +220,19 @@ TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Legge il contenuto di un file (.py, .csv, .txt, .bat, .log, ecc.)",
+        "description": "Legge qualsiasi file di testo sul PC (.py, .csv, .txt, .bat, .log, ecc.)",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Percorso completo del file"},
-                "max_lines": {"type": "integer", "description": "Righe massime da leggere (default 150)"}
+                "max_lines": {"type": "integer", "description": "Righe max da leggere (default 150)"}
             },
             "required": ["path"],
         },
     },
     {
         "name": "write_file",
-        "description": "Scrive o sovrascrive un file dentro la cartella Magic Dream (crea backup automatico). Usa per migliorare il codice.",
+        "description": "Scrive o sovrascrive un file dentro Magic Dream (backup automatico .bak). Usa per migliorare il codice.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -221,7 +272,7 @@ def tool_check_status() -> str:
 
 def tool_read_log(lines: int = 30) -> str:
     if not LOG_PATH.exists():
-        return "Log non trovato. Il supervisor non è ancora avviato."
+        return "Log non trovato. Il supervisor non e ancora avviato."
     text = LOG_PATH.read_text(encoding="utf-8", errors="replace")
     rows = text.splitlines()
     return "\n".join(rows[-lines:]) if rows else "(vuoto)"
@@ -243,7 +294,9 @@ def tool_read_magic_lab(file: str | None = None) -> str:
             if not rows:
                 return f"{file}: vuoto"
             header = ",".join(rows[0].keys())
-            body = "\n".join(",".join(str(v) for v in r.values()) for r in rows[:8])
+            body = "\n".join(
+                ",".join(str(v) for v in r.values()) for r in rows[:8]
+            )
             return f"{file} ({len(rows)} righe):\n{header}\n{body}"
         except Exception as e:
             return f"Errore: {e}"
@@ -267,7 +320,12 @@ def tool_run_update() -> str:
             [sys.executable, str(ROOT_DIR / "setup_magic_dream.py")],
             cwd=str(ROOT_DIR), capture_output=True, text=True, timeout=60,
         )
-        return "\n".join(results) + "\n\nSetup:\n" + (r.stdout or "") + (r.stderr or "")
+        return (
+            "\n".join(results)
+            + "\n\nSetup:\n"
+            + (r.stdout or "")
+            + (r.stderr or "")
+        )
     except Exception as e:
         return "\n".join(results) + f"\n\nSetup fallito: {e}"
 
@@ -284,8 +342,11 @@ def tool_run_setup() -> str:
 
 
 def tool_open_browser(app: str) -> str:
-    urls = {"App 1": "http://localhost:8601", "App 2": "http://localhost:8602",
-            "App 3": "http://localhost:8603"}
+    urls = {
+        "App 1": "http://localhost:8601",
+        "App 2": "http://localhost:8602",
+        "App 3": "http://localhost:8603",
+    }
     url = urls.get(app)
     if not url:
         return f"App sconosciuta: {app}"
@@ -293,7 +354,24 @@ def tool_open_browser(app: str) -> str:
     return f"Browser aperto su {url}"
 
 
-def tool_list_folder(path: str) -> str:
+def tool_read_source_code(filename: str) -> str:
+    """Legge il sorgente di un file Python dalla whitelist."""
+    clean = filename.strip().lstrip("/").lstrip("\\")
+    if clean not in SOURCE_WHITELIST:
+        return (
+            f"Accesso negato: '{clean}' non e nella whitelist. "
+            f"File ammessi: {SOURCE_WHITELIST}"
+        )
+    target = ROOT_DIR / clean
+    if not target.exists():
+        return f"File non trovato: {target}"
+    try:
+        return target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"Errore lettura {clean}: {e}"
+
+
+def _tool_list_folder(path: str) -> str:
     try:
         p = Path(path)
         if not p.exists():
@@ -303,7 +381,10 @@ def tool_list_folder(path: str) -> str:
         items = []
         for item in sorted(p.iterdir()):
             if item.is_dir():
-                sub = len(list(item.iterdir())) if item.is_dir() else 0
+                try:
+                    sub = len(list(item.iterdir()))
+                except PermissionError:
+                    sub = "?"
                 items.append(f"📁 {item.name}/  ({sub} elementi)")
             else:
                 size = item.stat().st_size
@@ -311,38 +392,38 @@ def tool_list_folder(path: str) -> str:
                 items.append(f"📄 {item.name}  ({size}B, {mtime})")
         return f"{path}  ({len(items)} elementi):\n" + "\n".join(items)
     except Exception as e:
-        return f"Errore: {e}"
+        return f"Errore list_folder: {e}"
 
 
-def tool_read_file(path: str, max_lines: int = 150) -> str:
+def _tool_read_file(path: str, max_lines: int = 150) -> str:
     try:
         p = Path(path)
         if not p.exists():
             return f"File non trovato: {path}"
         allowed = {'.py', '.txt', '.csv', '.json', '.md', '.bat', '.log', '.ini', '.cfg'}
         if p.suffix.lower() not in allowed:
-            return f"Tipo file non supportato per lettura: {p.suffix}"
+            return f"Tipo non supportato: {p.suffix}. Tipi OK: {allowed}"
         text = p.read_text(encoding='utf-8', errors='replace')
         lines = text.splitlines()
         preview = "\n".join(lines[:max_lines])
-        suffix = f"\n... ({len(lines) - max_lines} righe omesse)" if len(lines) > max_lines else ""
+        suffix = f"\n... ({len(lines)-max_lines} righe omesse)" if len(lines) > max_lines else ""
         return f"{path}  ({len(lines)} righe):\n{preview}{suffix}"
     except Exception as e:
-        return f"Errore: {e}"
+        return f"Errore read_file: {e}"
 
 
-def tool_write_file(path: str, content: str) -> str:
+def _tool_write_file(path: str, content: str) -> str:
     try:
         p = Path(path).resolve()
         if not str(p).startswith(str(ROOT_DIR.resolve())):
-            return f"Scrittura consentita solo dentro Magic Dream: {ROOT_DIR}"
+            return f"Scrittura consentita solo dentro: {ROOT_DIR}"
         if p.exists():
             shutil.copy2(str(p), str(p.with_suffix(p.suffix + ".bak")))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding='utf-8')
         return f"✅ Salvato: {p}"
     except Exception as e:
-        return f"Errore: {e}"
+        return f"Errore write_file: {e}"
 
 
 def execute_tool(name: str, inp: dict) -> str:
@@ -360,11 +441,13 @@ def execute_tool(name: str, inp: dict) -> str:
         elif name == "open_browser":
             return tool_open_browser(inp.get("app", "App 1"))
         elif name == "list_folder":
-            return tool_list_folder(inp.get("path", str(ROOT_DIR)))
+            return _tool_list_folder(inp.get("path", str(ROOT_DIR)))
         elif name == "read_file":
-            return tool_read_file(inp.get("path", ""), inp.get("max_lines", 150))
+            return _tool_read_file(inp.get("path", ""), inp.get("max_lines", 150))
         elif name == "write_file":
-            return tool_write_file(inp.get("path", ""), inp.get("content", ""))
+            return _tool_write_file(inp.get("path", ""), inp.get("content", ""))
+        elif name == "read_source_code":
+            return tool_read_source_code(inp.get("filename", ""))
         return f"Strumento sconosciuto: {name}"
     except Exception as e:
         return f"Errore {name}: {e}"
@@ -373,23 +456,49 @@ def execute_tool(name: str, inp: dict) -> str:
 # ── Claude agentic loop ─────────────────────────────────────────────────────
 
 def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
-    """Returns (reply_text, updated_history)."""
+    """
+    Returns (reply_text, updated_history).
+
+    History policy: only the LAST complete user/assistant exchange is kept
+    to avoid corruption from tool_use sequences cut mid-flight.
+    On API 400 (BadRequestError) the history is discarded and the message
+    is retried from scratch.
+    """
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
+
+    # Build initial message list — history + current user turn
     messages = history + [{"role": "user", "content": message}]
 
     for _ in range(10):  # max 10 tool rounds
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-        )
+        try:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+        except anthropic.BadRequestError:
+            # History is corrupted — retry from scratch with no history
+            messages = [{"role": "user", "content": message}]
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+
         if resp.stop_reason == "end_turn":
             text = "".join(b.text for b in resp.content if hasattr(b, "text"))
-            new_hist = messages + [{"role": "assistant", "content": resp.content}]
-            return text, new_hist[-30:]
+            # Keep only the last complete exchange to prevent corruption
+            clean_hist = [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": resp.content},
+            ]
+            return text, clean_hist
+
         if resp.stop_reason == "tool_use":
             results = []
             for b in resp.content:
@@ -406,7 +515,182 @@ def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
         else:
             break
 
-    return "Errore: risposta inattesa dall'API.", history
+    return "Errore: risposta inattesa dall'API.", []
+
+
+# ── Improvement cycle ───────────────────────────────────────────────────────
+
+def _read_all_csvs() -> str:
+    """Legge tutti i CSV di magic_lab e restituisce una stringa riassuntiva."""
+    if not MAGIC_LAB_DIR.exists():
+        return "Cartella magic_lab non trovata."
+    csvs = sorted(MAGIC_LAB_DIR.glob("*.csv"))
+    if not csvs:
+        return "Nessun CSV disponibile in magic_lab."
+    import csv as csvmod
+    parts = []
+    for f in csvs:
+        try:
+            rows = list(csvmod.DictReader(f.open(encoding="utf-8")))
+            if not rows:
+                parts.append(f"=== {f.name}: vuoto ===")
+                continue
+            header = ",".join(rows[0].keys())
+            body = "\n".join(
+                ",".join(str(v) for v in r.values()) for r in rows[:10]
+            )
+            parts.append(f"=== {f.name} ({len(rows)} righe) ===\n{header}\n{body}")
+        except Exception as e:
+            parts.append(f"=== {f.name}: errore lettura ({e}) ===")
+    return "\n\n".join(parts)
+
+
+def _save_analysis(text: str) -> None:
+    """Salva il testo di analisi in magic_lab/last_analysis.txt."""
+    try:
+        MAGIC_LAB_DIR.mkdir(parents=True, exist_ok=True)
+        LAST_ANALYSIS_FILE.write_text(
+            f"=== Analisi del {datetime.now().strftime('%d/%m/%Y %H:%M')} ===\n\n{text}",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # Non bloccare l'esecuzione per un errore di log
+
+
+def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
+    """
+    Ciclo di miglioramento autonomo in due fasi:
+    1. Analyst: analizza i risultati CSV e identifica cosa migliorare
+    2. Developer: propone modifiche Python concrete a magic_experiment_lab.py
+    Valida con ast.parse, crea backup e applica se valido.
+    """
+    import anthropic
+
+    msg_queue.put(("agent", "🔬 Ciclo di miglioramento avviato..."))
+
+    # --- Raccolta dati ---
+    if not WORKER_FILE.exists():
+        msg_queue.put((
+            "agent",
+            "❌ magic_experiment_lab.py non trovato — impossibile migliorare.",
+        ))
+        return
+
+    source_code = WORKER_FILE.read_text(encoding="utf-8", errors="replace")
+    csv_data = _read_all_csvs()
+
+    if csv_data.startswith("Nessun CSV") or csv_data.startswith("Cartella"):
+        msg_queue.put((
+            "agent",
+            "⏸ Ciclo di miglioramento posticipato — Magic Lab non ha ancora prodotto dati.",
+        ))
+        return
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # --- Chiamata 1: Analyst ---
+    analyst_prompt = (
+        "Sei un analista statistico del lotto italiano esperto di Machine Learning.\n\n"
+        "Ecco i risultati prodotti da Magic Lab (CSV):\n\n"
+        f"{csv_data}\n\n"
+        "Analizza i risultati delle 6 strategie (FreqHot8, FreqCold8, HotCold4+4, Decade8,"
+        " Delay8, NucleoPool). Identifica:\n"
+        "1. Quale strategia performa meglio e perche\n"
+        "2. Quali strategie sono sotto il benchmark (~2.8% hit rate per 3+ su 8)\n"
+        "3. Cosa migliorare concretamente nel codice Python\n"
+        "Sii specifico e tecnico. Rispondi in italiano."
+    )
+    try:
+        analyst_resp = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": analyst_prompt}],
+        )
+        analysis = "".join(
+            b.text for b in analyst_resp.content if hasattr(b, "text")
+        )
+    except Exception as e:
+        msg_queue.put(("agent", f"❌ Errore nella fase di analisi: {e}"))
+        return
+
+    msg_queue.put(("agent", "📊 Analisi completata. Developer sta scrivendo il codice..."))
+
+    # --- Chiamata 2: Developer ---
+    developer_prompt = (
+        "Sei uno sviluppatore Python esperto di analisi statistica del lotto italiano.\n\n"
+        "=== ANALISI DEL RICERCATORE ===\n"
+        f"{analysis}\n\n"
+        "=== CODICE ATTUALE DI magic_experiment_lab.py ===\n"
+        f"{source_code}\n\n"
+        "Basandoti sull'analisi, proponi SOLO le modifiche Python specifiche che migliorano"
+        " le strategie di Magic Dream. Requisiti:\n"
+        "- Fornisci il codice completo della/e funzione/i modificata/e (non frammenti)\n"
+        "- Il codice deve essere Python valido e sintatticamente corretto\n"
+        "- Non modificare la struttura generale del file, solo le strategie\n"
+        "- Se l'analisi non giustifica modifiche, scrivi solo: NESSUNA_MODIFICA\n"
+        "Rispondi SOLO con codice Python (nessun testo prima o dopo),"
+        " oppure NESSUNA_MODIFICA."
+    )
+    try:
+        dev_resp = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": developer_prompt}],
+        )
+        proposed_code = "".join(
+            b.text for b in dev_resp.content if hasattr(b, "text")
+        ).strip()
+    except Exception as e:
+        msg_queue.put(("agent", f"❌ Errore nella fase di sviluppo: {e}"))
+        _save_analysis(analysis)
+        return
+
+    if proposed_code == "NESSUNA_MODIFICA" or not proposed_code:
+        msg_queue.put((
+            "agent",
+            "ℹ️ Il Developer non ha proposto modifiche — le strategie attuali sono ottimali"
+            " rispetto ai dati disponibili.",
+        ))
+        _save_analysis(analysis)
+        return
+
+    # Pulisce eventuali backtick markdown (```python ... ```)
+    if proposed_code.startswith("```"):
+        lines = proposed_code.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        proposed_code = "\n".join(lines)
+
+    # --- Validazione AST ---
+    try:
+        ast.parse(proposed_code)
+    except SyntaxError as e:
+        msg_queue.put((
+            "agent",
+            f"❌ Codice proposto non valido (SyntaxError: {e})"
+            " — analisi salvata in magic_lab/last_analysis.txt",
+        ))
+        _save_analysis(
+            analysis + f"\n\n--- CODICE PROPOSTO (NON VALIDO) ---\n{proposed_code}"
+        )
+        return
+
+    # --- Backup e applicazione ---
+    try:
+        shutil.copy2(WORKER_FILE, WORKER_BACKUP)
+        WORKER_FILE.write_text(proposed_code, encoding="utf-8")
+        msg_queue.put((
+            "agent",
+            "✅ Miglioramento applicato a magic_experiment_lab.py — "
+            "backup in magic_experiment_lab_backup.py",
+        ))
+        _save_analysis(
+            analysis + f"\n\n--- MODIFICA APPLICATA ---\n{proposed_code}"
+        )
+    except Exception as e:
+        msg_queue.put(("agent", f"❌ Errore nel salvataggio del file: {e}"))
 
 
 # ── Desktop GUI ─────────────────────────────────────────────────────────────
@@ -431,6 +715,8 @@ class AgentApp:
         threading.Thread(target=self._startup_check, daemon=True).start()
         # Monitor loop
         threading.Thread(target=self._monitor_loop, daemon=True).start()
+        # Auto-improvement loop (ogni 6 ore)
+        threading.Thread(target=self._improvement_loop, daemon=True).start()
 
     # ── API key ────────────────────────────────────────────────────────────
 
@@ -450,7 +736,7 @@ class AgentApp:
     def _build_window(self) -> None:
         self.root = tk.Tk()
         self.root.title("🤖 Agente Magic Dream")
-        self.root.geometry("620x700")
+        self.root.geometry("640x720")
         self.root.configure(bg=self.BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.minsize(400, 500)
@@ -458,22 +744,30 @@ class AgentApp:
         # Header
         hdr = tk.Frame(self.root, bg="#111113", pady=8)
         hdr.pack(fill=tk.X)
-        tk.Label(hdr, text="🤖  Agente Magic Dream", bg="#111113",
-                 fg=self.TEXT, font=("Segoe UI", 14, "bold")).pack(side=tk.LEFT, padx=12)
+        tk.Label(
+            hdr, text="🤖  Agente Magic Dream", bg="#111113",
+            fg=self.TEXT, font=("Segoe UI", 14, "bold"),
+        ).pack(side=tk.LEFT, padx=12)
 
-        self._status_lbl = tk.Label(hdr, text="● avvio…", bg="#111113",
-                                    fg="#ffcc00", font=("Segoe UI", 10))
+        self._status_lbl = tk.Label(
+            hdr, text="● avvio…", bg="#111113",
+            fg="#ffcc00", font=("Segoe UI", 10),
+        )
         self._status_lbl.pack(side=tk.RIGHT, padx=12)
 
         # Quick buttons
         btn_bar = tk.Frame(self.root, bg=self.BG, pady=4)
         btn_bar.pack(fill=tk.X, padx=8)
-        for label, cmd in [
+
+        quick_buttons = [
             ("🔍 Controlla", lambda: self._send("Controlla tutte le app e dimmi lo stato.")),
-            ("📋 Log", lambda: self._send("Mostrami gli ultimi log.")),
-            ("⬇️ Aggiorna", lambda: self._send("Aggiorna Magic Dream da GitHub.")),
-            ("🌐 Apri App3", lambda: self._send("Apri App3 nel browser.")),
-        ]:
+            ("📋 Log",        lambda: self._send("Mostrami gli ultimi log.")),
+            ("⬇️ Aggiorna",  lambda: self._send("Aggiorna Magic Dream da GitHub.")),
+            ("🌐 Apri App3",  lambda: self._send("Apri App3 nel browser.")),
+            ("🔬 Migliora",   self._trigger_improvement),
+        ]
+
+        for label, cmd in quick_buttons:
             tk.Button(
                 btn_bar, text=label, command=cmd,
                 bg="#3a3a3c", fg=self.TEXT, relief=tk.FLAT,
@@ -481,7 +775,7 @@ class AgentApp:
                 activebackground="#48484a", activeforeground=self.TEXT,
             ).pack(side=tk.LEFT, padx=3)
 
-        # Key button
+        # API Key button — right side
         tk.Button(
             btn_bar, text="🔑 API Key", command=self._ask_api_key,
             bg="#3a3a3c", fg="#ffcc00", relief=tk.FLAT,
@@ -498,23 +792,32 @@ class AgentApp:
         self._chat.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
 
         # Tag styles
-        self._chat.tag_config("user_hdr", foreground="#0a84ff",
-                              font=("Segoe UI", 9, "bold"))
-        self._chat.tag_config("user_txt", foreground=self.TEXT,
-                              font=("Segoe UI", 11), lmargin1=16, lmargin2=16)
-        self._chat.tag_config("agent_hdr", foreground="#30d158",
-                              font=("Segoe UI", 9, "bold"))
-        self._chat.tag_config("agent_txt", foreground=self.TEXT,
-                              font=("Segoe UI", 11), lmargin1=16, lmargin2=16)
-        self._chat.tag_config("thinking", foreground="#636366",
-                              font=("Segoe UI", 10, "italic"), lmargin1=16)
+        self._chat.tag_config(
+            "user_hdr", foreground="#0a84ff", font=("Segoe UI", 9, "bold"),
+        )
+        self._chat.tag_config(
+            "user_txt", foreground=self.TEXT,
+            font=("Segoe UI", 11), lmargin1=16, lmargin2=16,
+        )
+        self._chat.tag_config(
+            "agent_hdr", foreground="#30d158", font=("Segoe UI", 9, "bold"),
+        )
+        self._chat.tag_config(
+            "agent_txt", foreground=self.TEXT,
+            font=("Segoe UI", 11), lmargin1=16, lmargin2=16,
+        )
+        self._chat.tag_config(
+            "thinking", foreground="#636366",
+            font=("Segoe UI", 10, "italic"), lmargin1=16,
+        )
 
         # Input row
         inp_frame = tk.Frame(self.root, bg=self.BG, pady=8)
         inp_frame.pack(fill=tk.X, padx=8, pady=(4, 8))
 
         self._entry = tk.Entry(
-            inp_frame, bg=self.INPUT_BG, fg=self.TEXT, insertbackground=self.TEXT,
+            inp_frame, bg=self.INPUT_BG, fg=self.TEXT,
+            insertbackground=self.TEXT,
             relief=tk.FLAT, font=("Segoe UI", 12), bd=8,
         )
         self._entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
@@ -555,12 +858,16 @@ class AgentApp:
 
     def _send(self, message: str) -> None:
         self._append("user", message)
-        threading.Thread(target=self._agent_thread, args=(message,), daemon=True).start()
+        threading.Thread(
+            target=self._agent_thread, args=(message,), daemon=True
+        ).start()
 
     def _agent_thread(self, message: str) -> None:
         if not self.api_key:
-            self.msg_queue.put(("agent",
-                "⚠️ Nessuna API key. Clicca '🔑 API Key' per inserirla."))
+            self.msg_queue.put((
+                "agent",
+                "⚠️ Nessuna API key. Clicca '🔑 API Key' per inserirla.",
+            ))
             return
         self.msg_queue.put(("thinking", "⏳ sto elaborando…"))
         try:
@@ -569,6 +876,22 @@ class AgentApp:
             self.msg_queue.put(("agent", reply))
         except Exception as e:
             self.msg_queue.put(("agent", f"❌ Errore: {e}"))
+
+    # ── Improvement trigger ─────────────────────────────────────────────────
+
+    def _trigger_improvement(self) -> None:
+        """Avvia manualmente il ciclo di miglioramento."""
+        if not self.api_key:
+            self._append(
+                "agent",
+                "⚠️ Nessuna API key. Clicca '🔑 API Key' per inserirla.",
+            )
+            return
+        threading.Thread(
+            target=run_improvement_cycle,
+            args=(self.api_key, self.msg_queue),
+            daemon=True,
+        ).start()
 
     # ── Queue processing ────────────────────────────────────────────────────
 
@@ -580,7 +903,6 @@ class AgentApp:
             while True:
                 kind, data = self.msg_queue.get_nowait()
                 if kind == "thinking":
-                    # Remove previous thinking line if present
                     self._remove_thinking()
                     self._append("thinking", data)
                 elif kind == "agent":
@@ -595,7 +917,6 @@ class AgentApp:
 
     def _remove_thinking(self) -> None:
         self._chat.config(state=tk.NORMAL)
-        # Find and delete thinking lines
         start = "1.0"
         while True:
             pos = self._chat.search("⏳ sto elaborando…", start, tk.END)
@@ -621,94 +942,83 @@ class AgentApp:
     def _startup_check(self) -> None:
         time.sleep(STARTUP_DELAY)
         if not self.api_key:
-            self.msg_queue.put(("agent",
+            self.msg_queue.put((
+                "agent",
                 "Ciao! Sono il tuo agente Magic Dream.\n\n"
                 "⚠️ Inserisci la tua API Key Anthropic (clicca '🔑 API Key') "
                 "per attivarmi completamente.\n\n"
-                "Senza chiave posso mostrare solo lo stato base delle app."))
-            # Show basic status anyway
+                "Senza chiave posso mostrare solo lo stato base delle app.",
+            ))
             status = tool_check_status()
             self.msg_queue.put(("agent", "Stato attuale:\n" + status))
             return
-        # Raccoglie tutto il contesto disponibile e lo manda a Claude
         status = tool_check_status()
         lab_data = tool_read_magic_lab()
-        log_tail = tool_read_log(20)
-
-        startup_msg = f"""Sei appena avviato. Hai ora gli strumenti per esplorare il PC.
-
-STATO APP:
-{status}
-
-MAGIC LAB CSV:
-{lab_data}
-
-LOG:
-{log_tail}
-
-COMPITI IMMEDIATI (falli in ordine, usa i tool):
-1. Usa list_folder su C:\\Users\\serti\\OneDrive\\Desktop per vedere tutte le cartelle
-2. Trova la cartella lotto originale (probabilmente "lotto" o "3 ml" sul Desktop)
-3. Leggi i file Python principali della cartella Magic Dream (magic_experiment_lab.py)
-4. Confronta le strategie Magic Dream con quello che trovi nella cartella lotto originale
-5. Analizza i CSV in magic_lab/ e dimmi quali strategie performano meglio
-6. Fornisci un report all'utente: cosa hai trovato, cosa funziona, cosa migliorare
-
-Lavora in autonomia. Non chiedere conferma all'utente — esplora, leggi, analizza e poi riferisci i risultati."""
-
         threading.Thread(
             target=self._agent_thread,
-            args=(startup_msg,),
+            args=(
+                f"Sei appena avviato. Stato app:\n{status}\n\nMagic Lab:\n{lab_data}\n\n"
+                "COMPITI (falli tutti in sequenza senza aspettare input):\n"
+                "1. Usa list_folder su C:\\Users\\serti\\OneDrive\\Desktop per trovare tutte le cartelle\n"
+                "2. Trova la cartella lotto originale (es. 'lotto' o '3 ml') ed esplorane il contenuto\n"
+                "3. Leggi magic_experiment_lab.py con read_source_code per capire le strategie attuali\n"
+                "4. Analizza i CSV in magic_lab/ — quale strategia ha il hit rate più alto?\n"
+                "5. Dammi un report: cosa hai trovato, confronto lotto vs Magic Dream, cosa migliorare\n"
+                "Agisci in autonomia, non chiedere conferma.",
+            ),
             daemon=True,
         ).start()
 
     def _monitor_loop(self) -> None:
-        time.sleep(STARTUP_DELAY + 30)
-        last_analysis = 0
+        time.sleep(STARTUP_DELAY + 30)  # lascia tempo al check di avvio
         while True:
             time.sleep(MONITOR_INTERVAL)
-
-            # Controllo salute app
             offline = [n for n, p in PORTS.items() if not _health(p)]
             if offline:
                 newly_offline = set(offline) - self._offline_reported
                 if newly_offline and self.api_key:
                     self._offline_reported.update(newly_offline)
-                    self.msg_queue.put(("agent", f"⚠️ {', '.join(newly_offline)} offline. Verifico..."))
+                    msg = (
+                        f"⚠️ Rilevato: {', '.join(newly_offline)} non risponde. Verifico."
+                    )
+                    self.msg_queue.put(("agent", msg))
+                    problem = (
+                        f"{', '.join(newly_offline)} risulta offline. "
+                        "Controlla i log e dimmi cosa sta succedendo. "
+                        "Il supervisor dovrebbe riavviarle automaticamente — "
+                        "conferma che stia funzionando."
+                    )
                     threading.Thread(
-                        target=self._agent_thread,
-                        args=(f"{', '.join(newly_offline)} è offline. Controlla i log, dimmi cosa succede e se il supervisor sta riavviando.",),
-                        daemon=True,
+                        target=self._agent_thread, args=(problem,), daemon=True
                     ).start()
             else:
                 if self._offline_reported:
                     self._offline_reported.clear()
                     self.msg_queue.put(("agent", "✅ Tutte le app sono tornate online."))
             all_ok = not offline
-            self.msg_queue.put(("status", (
-                "● tutto ok" if all_ok else f"● {len(offline)} offline",
-                "#30d158" if all_ok else "#ff453a",
-            )))
+            dot = "● tutto ok" if all_ok else f"● {len(offline)} offline"
+            color = "#30d158" if all_ok else "#ff453a"
+            self.msg_queue.put(("status", (dot, color)))
 
-            # Analisi autonoma ogni 6 ore
-            if self.api_key and time.time() - last_analysis > ANALYSIS_INTERVAL:
-                last_analysis = time.time()
-                lab_data = tool_read_magic_lab()
-                if "Nessun CSV" not in lab_data and "non trovata" not in lab_data:
-                    analysis_msg = f"""Analisi periodica autonoma. Dati aggiornati da Magic Lab:
-
-{lab_data}
-
-Stato app: {tool_check_status()}
-
-Analizza i risultati delle 6 strategie. Quale sta performando meglio?
-Ci sono miglioramenti da fare? Dammi un report breve con conclusioni concrete."""
-                    self.msg_queue.put(("agent", "🔬 Analisi autonoma in corso..."))
-                    threading.Thread(
-                        target=self._agent_thread,
-                        args=(analysis_msg,),
-                        daemon=True,
-                    ).start()
+    def _improvement_loop(self) -> None:
+        """Ciclo automatico di miglioramento ogni IMPROVE_INTERVAL secondi."""
+        # Prima attesa: aspetta startup + margine prima di iniziare il ciclo
+        time.sleep(STARTUP_DELAY + 60)
+        while True:
+            time.sleep(IMPROVE_INTERVAL)
+            # Solo se magic_lab ha CSV (Magic Lab ha girato almeno una volta)
+            if not self.api_key:
+                continue
+            if not MAGIC_LAB_DIR.exists():
+                continue
+            csvs = list(MAGIC_LAB_DIR.glob("*.csv"))
+            if not csvs:
+                continue
+            threading.Thread(
+                target=run_improvement_cycle,
+                args=(self.api_key, self.msg_queue),
+                daemon=True,
+            ).start()
 
     # ── API key dialog ──────────────────────────────────────────────────────
 
@@ -719,14 +1029,20 @@ Ci sono miglioramenti da fare? Dammi un report breve con conclusioni concrete.""
         win.configure(bg=self.BG)
         win.grab_set()
 
-        tk.Label(win, text="Incolla qui la tua API Key Anthropic:",
-                 bg=self.BG, fg=self.TEXT, font=("Segoe UI", 11)).pack(pady=(20, 6))
-        tk.Label(win, text="(la trovi su console.anthropic.com → API Keys)",
-                 bg=self.BG, fg="#636366", font=("Segoe UI", 9)).pack()
+        tk.Label(
+            win, text="Incolla qui la tua API Key Anthropic:",
+            bg=self.BG, fg=self.TEXT, font=("Segoe UI", 11),
+        ).pack(pady=(20, 6))
+        tk.Label(
+            win, text="(la trovi su console.anthropic.com → API Keys)",
+            bg=self.BG, fg="#636366", font=("Segoe UI", 9),
+        ).pack()
 
-        entry = tk.Entry(win, show="*", width=50, bg=self.INPUT_BG,
-                         fg=self.TEXT, insertbackground=self.TEXT,
-                         font=("Segoe UI", 11), relief=tk.FLAT, bd=6)
+        entry = tk.Entry(
+            win, show="*", width=50, bg=self.INPUT_BG,
+            fg=self.TEXT, insertbackground=self.TEXT,
+            font=("Segoe UI", 11), relief=tk.FLAT, bd=6,
+        )
         entry.pack(pady=10, ipady=4)
         if self.api_key:
             entry.insert(0, self.api_key)
@@ -740,9 +1056,11 @@ Ci sono miglioramenti da fare? Dammi un report breve con conclusioni concrete.""
             else:
                 entry.config(bg="#4a1010")
 
-        tk.Button(win, text="Salva", command=save,
-                  bg=self.BUBBLE_USER, fg="white", relief=tk.FLAT,
-                  font=("Segoe UI", 11), padx=20, pady=6).pack()
+        tk.Button(
+            win, text="Salva", command=save,
+            bg=self.BUBBLE_USER, fg="white", relief=tk.FLAT,
+            font=("Segoe UI", 11), padx=20, pady=6,
+        ).pack()
         entry.focus()
         entry.bind("<Return>", lambda _: save())
 
