@@ -1101,7 +1101,6 @@ class AgentApp:
         notes = tool_read_notes()
         worker_status = tool_check_worker()
 
-        # Trova il primo desktop esistente
         desktop_paths = "\n".join(str(p) for p in DESKTOP_CANDIDATES)
 
         threading.Thread(
@@ -1111,16 +1110,22 @@ class AgentApp:
                 f"Worker:\n{worker_status}\n\n"
                 f"Magic Lab:\n{lab_data}\n\n"
                 f"Note sessioni precedenti:\n{notes}\n\n"
-                "COMPITI (eseguili in sequenza senza aspettare input):\n"
-                f"1. Leggi le note precedenti qui sopra — ricorda cosa sai già\n"
-                f"2. Prova list_folder sui questi percorsi Desktop (nell'ordine) finché uno funziona:\n"
-                f"{desktop_paths}\n"
-                "3. Trova la cartella lotto originale (es. 'lotto' o '3 ml') ed esplorane il contenuto\n"
-                "4. Verifica lo stato del worker — se fermo, avvialo con start_worker\n"
-                "5. Analizza i CSV in magic_lab/ — quale strategia ha il hit rate più alto?\n"
-                "6. Salva le scoperte importanti con save_note (percorso lotto trovato, hit rate migliore)\n"
-                "7. Dammi un report finale: stato sistemi, confronto strategie, cosa migliorare\n"
-                "Agisci in autonomia, non chiedere conferma.",
+                "COMPITI DA FARE SUBITO in sequenza, senza aspettare input dall'utente:\n"
+                "1. Leggi le note precedenti — ricorda cosa sai gia'\n"
+                f"2. Usa list_folder su questi percorsi Desktop nell'ordine finche' uno funziona:\n{desktop_paths}\n"
+                "3. Trova la cartella lotto originale ('lotto' o '3 ml') e leggine il contenuto\n"
+                "4. Verifica il worker: se fermo da piu di 3 ore, avvialo con start_worker\n"
+                "5. Leggi latest_strategy_ranking.csv in magic_lab/ — quale strategia ha il miglior 'Hit >=3 T0 %'?\n"
+                "6. Leggi latest_next_predictions.csv — mostra all'utente i numeri Consensus8 da giocare\n"
+                "7. Leggi latest_range_positions.csv — qual e' il semaforo attuale?\n"
+                "8. Salva un riassunto con save_note: strategia migliore, numeri Consensus8, semaforo\n"
+                "9. Scrivi un messaggio BREVE e DIRETTO all'utente:\n"
+                "   - Stato sistema (tutto ok / problemi)\n"
+                "   - Strategia migliore e hit rate T0\n"
+                "   - I numeri Consensus8 da giocare oggi\n"
+                "   - Semaforo: verde/blu/giallo/rosso e cosa fare\n"
+                "   - Una sola raccomandazione finale\n"
+                "NON chiedere conferma. NON spiegare il processo. Solo il risultato finale.",
             ),
             daemon=True,
         ).start()
