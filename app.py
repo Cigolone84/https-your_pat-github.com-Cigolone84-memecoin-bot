@@ -15,7 +15,7 @@ from datetime import date, timedelta
 import warnings
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="Lotto NO PLUS", page_icon="🎯", layout="wide",
+st.set_page_config(page_title="Magic Dream — App 1", page_icon="🎯", layout="wide",
                    initial_sidebar_state="expanded")
 
 # ── THEME ─────────────────────────────────────────────────────────────────────

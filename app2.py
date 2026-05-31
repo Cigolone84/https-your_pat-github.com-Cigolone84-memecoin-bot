@@ -14,7 +14,7 @@ import re, os, warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="Meta-Learner — Signal Correction",
+    page_title="Magic Dream — App 2",
     page_icon="🧬", layout="wide",
     initial_sidebar_state="collapsed",
 )

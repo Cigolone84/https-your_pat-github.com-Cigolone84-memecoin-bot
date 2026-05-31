@@ -49,7 +49,7 @@ def main() -> int:
     magic_lab_dir.mkdir(parents=True, exist_ok=True)
     print(f"Cartella magic_lab pronta: {magic_lab_dir}")
 
-    # 2. Deploy App3 Magic Dream (sempre, indipendente dal lotto)
+    # 2. Deploy App1, App2, App3 (sempre, indipendente dal lotto)
     app3_src = ROOT_DIR / "magic_dream_app3.py"
     app3_lifecycle_dir = ROOT_DIR / "app3-lifecycle"
     app3_dst = app3_lifecycle_dir / "app3.py"
@@ -62,6 +62,19 @@ def main() -> int:
             print(f"ERRORE copia App3: {e}")
     else:
         print(f"ATTENZIONE: {app3_src} non trovata — App3 non aggiornata")
+
+    # Deploy App1 e App2 nella cartella dashboard (versioni pulite da GitHub)
+    for src_name, dst_name in [("app.py", "app.py"), ("app2.py", "app2.py")]:
+        src = ROOT_DIR / src_name
+        dst = DASHBOARD_DIR / dst_name
+        if src.exists():
+            try:
+                shutil.copy2(str(src), str(dst))
+                print(f"{src_name} installata: {dst}")
+            except Exception as e:
+                print(f"ERRORE copia {src_name}: {e}")
+        else:
+            print(f"ATTENZIONE: {src_name} non trovata in {ROOT_DIR}")
 
     # 3. Copia file lotto (non bloccante se non trovati)
     lotto_dir = find_lotto_dir()
