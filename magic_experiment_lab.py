@@ -76,6 +76,7 @@ STRATEGY_NAMES = [
     "Delay8",
     "NucleoPool",
     "Consensus8",
+    "PoolTop8",
 ]
 
 # ── Data helpers ─────────────────────────────────────────────────────────────
@@ -131,7 +132,7 @@ def load_draws(limit: int = 0) -> pd.DataFrame:
         "actual": actuals,
     })
 
-    # Also keep sestine columns for NucleoPool strategy
+    # Keep sestine columns (NucleoPool) and ML Top-8 + pool column (PoolTop8)
     for k in range(1, 6):
         col = f"Sestina {k}"
         if col in df.columns:
@@ -142,6 +143,20 @@ def load_draws(limit: int = 0) -> pd.DataFrame:
                     ses_vals.append(frozenset(nums))
             if ses_vals:
                 result[col] = ses_vals
+
+    # ML Top-8 pool (App1 prediction) — used by PoolTop8 strategy
+    if "ML Top-8" in df.columns:
+        pool_vals = []
+        ses_cols_present = [f"Sestina {k}" for k in range(1, 6) if f"Sestina {k}" in df.columns]
+        for _, row in df.iterrows():
+            if len(parse_nums(row.get("Numeri Reali", ""))) != 6:
+                continue
+            pool = parse_nums(row.get("ML Top-8", ""))
+            for sc in ses_cols_present:
+                pool = pool | parse_nums(row.get(sc, ""))
+            pool_vals.append(pool)
+        if pool_vals:
+            result["pool"] = pool_vals
 
     if limit > 0:
         result = result.tail(limit).reset_index(drop=True)
@@ -277,11 +292,51 @@ def strategy_consensus(history: List[frozenset], n: int = 8, window: int = 100) 
     return frozenset(top)
 
 
+def strategy_pool_top8(
+    history: List[frozenset],
+    pool_history: Optional[List[frozenset]],
+    n: int = 8,
+    window: int = 100,
+) -> frozenset:
+    """
+    Pick n numbers from the CURRENT App1 pool (ML Top-8 + Sestine union).
+    Uses frequency analysis WITHIN the pool to rank candidates.
+    Falls back to FreqHot8 if no pool data available.
+
+    Rationale: App1's pool contained 5 winning numbers 35 times and all 6
+    once in 7000+ draws. When playing within the pool we maximise the chance
+    of hitting 5-6. Here we score each pool number by recency of appearance.
+    """
+    if not pool_history or len(pool_history) == 0:
+        return strategy_freq_hot(history, n=n, window=window)
+
+    current_pool = pool_history[-1]  # pool for the NEXT draw (last known)
+    if len(current_pool) < n:
+        # pool too small — supplement with FreqHot from ALL_NUMS outside pool
+        extra = strategy_freq_hot(history, n=n * 2, window=window) - current_pool
+        return current_pool | frozenset(sorted(extra)[:n - len(current_pool)])
+
+    # Score each pool number: frequency in recent draws (higher = better)
+    recent = history[-window:] if len(history) >= window else history
+    freq = Counter(num for draw in recent for num in draw)
+    delay_map = {}
+    total = len(history)
+    for pos, draw in enumerate(history):
+        for num in draw:
+            delay_map[num] = pos
+    delay = {num: total - delay_map.get(num, -1) for num in current_pool}
+
+    # Rank by: combined score of frequency + delay (balance hot/timing)
+    top = sorted(current_pool, key=lambda x: -(freq.get(x, 0) * 0.5 + delay.get(x, 0) * 0.5))[:n]
+    return frozenset(top)
+
+
 def _apply_strategy(
     name: str,
     history: List[frozenset],
     ses_history: Optional[List[List[frozenset]]],
     freq_window: int,
+    pool_history: Optional[List[frozenset]] = None,
 ) -> frozenset:
     if name == "FreqHot8":
         return strategy_freq_hot(history, window=freq_window)
@@ -297,6 +352,8 @@ def _apply_strategy(
         return strategy_nucleo_pool(history, ses_history, window=freq_window)
     if name == "Consensus8":
         return strategy_consensus(history, window=freq_window)
+    if name == "PoolTop8":
+        return strategy_pool_top8(history, pool_history, window=freq_window)
     raise ValueError(f"Strategia sconosciuta: {name}")
 
 
@@ -321,6 +378,10 @@ def run_backtest(
     ses_cols = [f"Sestina {k}" for k in range(1, 6) if f"Sestina {k}" in df.columns]
     has_ses = len(ses_cols) == 5
 
+    # Build pool history (ML Top-8 ∪ Sestine) for PoolTop8
+    has_pool = "pool" in df.columns
+    pool_list: List[frozenset] = list(df["pool"]) if has_pool else []
+
     results: dict[str, list] = {s: [] for s in STRATEGY_NAMES}
 
     for i in range(warmup, n - 1):  # need at least T0, skip last row (no future)
@@ -331,10 +392,11 @@ def run_backtest(
                 [frozenset(df.iloc[j][sc]) for sc in ses_cols]
                 for j in range(i)
             ]
+        pool_hist = pool_list[:i] if has_pool else None
 
         for sname in STRATEGY_NAMES:
             try:
-                cands = _apply_strategy(sname, history_so_far, ses_hist, freq_window)
+                cands = _apply_strategy(sname, history_so_far, ses_hist, freq_window, pool_hist)
             except Exception:
                 cands = frozenset()
 
@@ -382,16 +444,20 @@ def generate_next_predictions(
             [frozenset(df.iloc[j][sc]) for sc in ses_cols]
             for j in range(len(df))
         ]
+    pool_hist = list(df["pool"]) if "pool" in df.columns else None
 
     last_draw = int(df.iloc[-1]["draw"])
     next_draw = last_draw + 1
     rows = []
 
-    top_strategies = list(ranking["Strategia"].head(keep_top)) if len(ranking) else STRATEGY_NAMES[:keep_top]
+    # Always include PoolTop8 regardless of keep_top ranking
+    all_strats = list(ranking["Strategia"].head(keep_top)) if len(ranking) else STRATEGY_NAMES[:keep_top]
+    if "PoolTop8" not in all_strats and pool_hist:
+        all_strats.append("PoolTop8")
 
-    for sname in top_strategies:
+    for sname in all_strats:
         try:
-            cands = _apply_strategy(sname, actuals, ses_hist, freq_window)
+            cands = _apply_strategy(sname, actuals, ses_hist, freq_window, pool_hist)
         except Exception:
             cands = frozenset()
         rows.append({

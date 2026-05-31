@@ -56,6 +56,7 @@ st.markdown("""
 .c5 { background: #7c3aed; }
 .c6 { background: #0891b2; }
 .c7 { background: #059669; border: 3px solid #fbbf24; }
+.c8 { background: #92400e; border: 3px solid #f97316; }
 
 .semaforo-verde  { color: #16a34a; font-size: 2rem; font-weight: 700; }
 .semaforo-blu    { color: #1d4ed8; font-size: 2rem; font-weight: 700; }
@@ -74,6 +75,7 @@ STRATEGY_COLORS = {
     "Delay8":      "c5",
     "NucleoPool":  "c6",
     "Consensus8":  "c7",
+    "PoolTop8":    "c8",
 }
 
 AZIONE_EMOJI = {
@@ -237,11 +239,15 @@ with tab2:
         pred_col  = "Predizione" if "Predizione" in next_df.columns else None
 
         if strat_col and pred_col:
-            # Find Consensus8 prediction to highlight
+            # Find Consensus8 and PoolTop8 predictions to highlight
             consensus_nums: set = set()
+            pool_nums: set = set()
             for _, row in next_df.iterrows():
-                if str(row[strat_col]) == "Consensus8":
+                s = str(row[strat_col])
+                if s == "Consensus8":
                     consensus_nums = set(int(x) for x in str(row[pred_col]).split() if x.strip().isdigit())
+                elif s == "PoolTop8":
+                    pool_nums = set(int(x) for x in str(row[pred_col]).split() if x.strip().isdigit())
 
             # Count how many strategies pick each number
             vote_count: Counter = Counter()
@@ -251,12 +257,22 @@ with tab2:
                         if x.strip().isdigit():
                             vote_count[int(x)] += 1
 
-            # Show consensus / "play these" box first
-            if consensus_nums:
-                st.markdown("### 🎯 Gioca questi — Consensus8")
+            # Show PoolTop8 first — App1 pool, historically hits 5-6 numbers
+            if pool_nums:
+                st.markdown("### 🏆 PoolTop8 — Dal pool di App1 (ML Top-8 + Sestine)")
                 st.markdown(
-                    "Numeri scelti da **tutte le strategie insieme** (voto di maggioranza):",
+                    "I **migliori 8 numeri dentro il pool di App1**. "
+                    "Il pool ha contenuto **5 numeri vincenti 35 volte** e **6 numeri una volta** su 7000 draw."
                 )
+                overlap = pool_nums & consensus_nums
+                st.markdown(balls_html(" ".join(str(n) for n in pool_nums), "c8"), unsafe_allow_html=True)
+                if overlap:
+                    st.caption(f"Numeri in comune con Consensus8: {sorted(overlap)} — massima confidenza")
+                st.markdown("---")
+
+            # Show consensus / "play these" box
+            if consensus_nums:
+                st.markdown("### 🎯 Consensus8 — Voto di tutte le strategie")
                 st.markdown(balls_html(" ".join(str(n) for n in consensus_nums), "c7"), unsafe_allow_html=True)
                 st.markdown("---")
 
@@ -281,7 +297,8 @@ with tab2:
             "**Decade8** = decadi | "
             "**Delay8** = massimo ritardo | "
             "**NucleoPool** = co-occorrenze | "
-            "**Consensus8** = voto di tutte le strategie"
+            "**Consensus8** = voto di tutte le strategie | "
+            "**PoolTop8** = migliori 8 dal pool App1 (ML Top-8 + Sestine)"
         )
 
 # ─────────────────────────────── TAB 3: Semaforo ─────────────────────────────
