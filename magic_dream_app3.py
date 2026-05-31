@@ -20,10 +20,12 @@ DASHBOARD_DIR  = ROOT_DIR / "app1-app2-dashboard" / "lotto-dashboard"
 BACKTEST_PATH  = DASHBOARD_DIR / "backtest_ml_storico.xlsx"
 LOG_PATH       = ROOT_DIR / "magic_dream_24_7.log"
 
-LAB_RANKING  = MAGIC_LAB_DIR / "latest_strategy_ranking.csv"
-LAB_NEXT     = MAGIC_LAB_DIR / "latest_next_predictions.csv"
-LAB_GAPS     = MAGIC_LAB_DIR / "latest_event_gaps.csv"
-LAB_RANGE    = MAGIC_LAB_DIR / "latest_range_positions.csv"
+LAB_RANKING     = MAGIC_LAB_DIR / "latest_strategy_ranking.csv"
+LAB_NEXT        = MAGIC_LAB_DIR / "latest_next_predictions.csv"
+LAB_GAPS        = MAGIC_LAB_DIR / "latest_event_gaps.csv"
+LAB_RANGE       = MAGIC_LAB_DIR / "latest_range_positions.csv"
+LAB_COMPARISON  = MAGIC_LAB_DIR / "latest_strategy_comparison.csv"
+LAB_DETAIL      = MAGIC_LAB_DIR / "latest_backtest_detail.csv"
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -155,10 +157,11 @@ with st.sidebar:
 # ── Main ───────────────────────────────────────────────────────────────────────
 st.title("🎯 Magic Dream — Centro Operativo")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Strategie",
     "🔢 Previsioni",
     "🚦 Semaforo",
+    "📈 Storico",
     "⚙️ Stato",
 ])
 
@@ -345,8 +348,87 @@ with tab3:
             else:
                 st.info("Dati cicli non disponibili.")
 
-# ─────────────────────────────── TAB 4: Stato ────────────────────────────────
+# ─────────────────────────────── TAB 4: Storico ──────────────────────────────
 with tab4:
+    st.subheader("Storico — Confronto strategie per estrazione")
+    st.caption(
+        "Ogni riga = una draw. Colonne = hit_t0 per ogni strategia. "
+        "Vincitore = strategia con il punteggio più alto in quel draw."
+    )
+
+    cmp_df = read_csv_safe(str(LAB_COMPARISON))
+
+    if cmp_df.empty:
+        st.warning(
+            "⏳ Dati storico non disponibili.\n\n"
+            "Attendi che Magic Lab completi un ciclo completo (3-5 min dal primo avvio)."
+        )
+    else:
+        strat_cols = [c for c in cmp_df.columns if c not in ("draw", "vincitore", "max_hit")]
+
+        if "vincitore" in cmp_df.columns:
+            win_counts = cmp_df["vincitore"].value_counts().rename_axis("Strategia").reset_index(name="Vittorie")
+            win_counts = win_counts.sort_values("Vittorie", ascending=False)
+
+            st.markdown("### Vittorie per strategia (draw con hit_t0 massimo)")
+            colA, colB = st.columns([2, 1])
+            with colA:
+                st.bar_chart(win_counts.set_index("Strategia")["Vittorie"])
+            with colB:
+                st.dataframe(win_counts, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        if "max_hit" in cmp_df.columns:
+            dist = cmp_df["max_hit"].value_counts().sort_index().rename_axis("Hit max").reset_index(name="Draw")
+            colC, colD = st.columns([2, 1])
+            with colC:
+                st.markdown("### Distribuzione hit massimo per draw")
+                st.bar_chart(dist.set_index("Hit max")["Draw"])
+            with colD:
+                total = len(cmp_df)
+                for _, r in dist.iterrows():
+                    h = int(r["Hit max"])
+                    n = int(r["Draw"])
+                    pct = n / total * 100
+                    label = f"Hit = {h}" if h < 5 else f"**Hit = {h}** 🔥"
+                    st.markdown(f"{label}: {n} draw ({pct:.1f}%)")
+
+        st.markdown("---")
+
+        n_show = st.slider("Draw da mostrare (più recenti)", min_value=50,
+                           max_value=min(2000, len(cmp_df)), value=min(500, len(cmp_df)), step=50)
+        st.markdown(f"### Ultimi {n_show} draw — hit_t0 per strategia")
+
+        show_df = cmp_df.sort_values("draw", ascending=False).head(n_show).copy()
+
+        def color_hit(val):
+            if pd.isna(val):
+                return ""
+            try:
+                v = int(val)
+            except Exception:
+                return ""
+            if v >= 5:
+                return "background-color:#7f1d1d; color:#fca5a5; font-weight:700"
+            if v == 4:
+                return "background-color:#1e3a5f; color:#93c5fd; font-weight:700"
+            if v == 3:
+                return "background-color:#1e4a2e; color:#86efac"
+            return ""
+
+        style_cols = [c for c in strat_cols if c in show_df.columns]
+        styled = show_df.style.applymap(color_hit, subset=style_cols)
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    detail_df = read_csv_safe(str(LAB_DETAIL))
+    if not detail_df.empty:
+        with st.expander("Dettaglio completo (tutte le righe)", expanded=False):
+            st.dataframe(detail_df.tail(3000), use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────── TAB 5: Stato ────────────────────────────────
+with tab5:
     st.subheader("Stato sistema Magic Dream")
 
     c1, c2, c3 = st.columns(3)

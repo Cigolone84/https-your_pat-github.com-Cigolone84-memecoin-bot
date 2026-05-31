@@ -8,6 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from itertools import combinations
+from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 import requests, re
@@ -1542,6 +1543,105 @@ def tab_dati(df):
     st.download_button("⬇️ Scarica CSV selezionato", csv, "lotto_export.csv", "text/csv")
 
 
+# ── TAB 6: STORICO STRATEGIE (Magic Lab) ─────────────────────────────────────
+def tab_storico_strategie():
+    st.subheader("📈 Storico Strategie — confronto draw per draw")
+    st.caption(
+        "Dati prodotti da Magic Lab (magic_experiment_lab.py). "
+        "Ogni riga = una draw. Ogni colonna = hit_t0 di quella strategia al draw T+0."
+    )
+
+    # Try to find magic_lab relative to this file
+    _here = Path(__file__).resolve().parent
+    for _candidate in [_here / "../../magic_lab", _here / "../magic_lab", _here / "magic_lab"]:
+        _lab_dir = _candidate.resolve()
+        if _lab_dir.exists():
+            break
+    else:
+        _lab_dir = None
+
+    _cmp_path = (_lab_dir / "latest_strategy_comparison.csv") if _lab_dir else None
+    _det_path = (_lab_dir / "latest_backtest_detail.csv")    if _lab_dir else None
+
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _load(p: str) -> pd.DataFrame:
+        try:
+            return pd.read_csv(p)
+        except Exception:
+            return pd.DataFrame()
+
+    if _cmp_path is None or not _cmp_path.exists():
+        st.warning(
+            "⏳ Magic Lab non ha ancora prodotto i dati storico.\n\n"
+            "Attendi il primo ciclo di Magic Dream (3-5 min)."
+        )
+        return
+
+    cmp = _load(str(_cmp_path))
+    if cmp.empty:
+        st.warning("⏳ Nessun dato disponibile.")
+        return
+
+    strat_cols = [c for c in cmp.columns if c not in ("draw", "vincitore", "max_hit")]
+
+    if "vincitore" in cmp.columns:
+        win_counts = cmp["vincitore"].value_counts().rename_axis("Strategia").reset_index(name="Vittorie")
+        win_counts = win_counts.sort_values("Vittorie", ascending=False)
+        st.markdown("### Vittorie per strategia")
+        wA, wB = st.columns([2, 1])
+        with wA:
+            fig_w = px.bar(win_counts, x="Strategia", y="Vittorie",
+                           color="Strategia", title="Quante draw ha vinto ogni strategia")
+            st.plotly_chart(fig_w, use_container_width=True)
+        with wB:
+            st.dataframe(win_counts, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    if "max_hit" in cmp.columns:
+        dist = cmp["max_hit"].value_counts().sort_index().rename_axis("Hit max").reset_index(name="Draw")
+        total = len(cmp)
+        dA, dB = st.columns([2, 1])
+        with dA:
+            fig_d = px.bar(dist, x="Hit max", y="Draw", title="Distribuzione hit massimo per draw")
+            st.plotly_chart(fig_d, use_container_width=True)
+        with dB:
+            st.markdown("**Frequenza hit massimi**")
+            for _, r in dist.iterrows():
+                h = int(r["Hit max"])
+                n = int(r["Draw"])
+                pct = n / total * 100
+                tag = " 🔥" if h >= 5 else ""
+                st.markdown(f"Hit = **{h}**{tag}: {n} draw ({pct:.1f}%)")
+
+    st.markdown("---")
+
+    n_show = st.slider("Draw da mostrare (più recenti)", 50, min(2000, len(cmp)), min(500, len(cmp)), 50)
+    show = cmp.sort_values("draw", ascending=False).head(n_show).copy()
+
+    def _color(val):
+        try:
+            v = int(val)
+        except Exception:
+            return ""
+        if v >= 5:
+            return "background-color:#7f1d1d; color:#fca5a5; font-weight:700"
+        if v == 4:
+            return "background-color:#1e3a5f; color:#93c5fd; font-weight:700"
+        if v == 3:
+            return "background-color:#1e4a2e; color:#86efac"
+        return ""
+
+    sc = [c for c in strat_cols if c in show.columns]
+    st.dataframe(show.style.applymap(_color, subset=sc), use_container_width=True, hide_index=True)
+
+    if _det_path and _det_path.exists():
+        with st.expander("Dettaglio completo draw × strategia", expanded=False):
+            det = _load(str(_det_path))
+            if not det.empty:
+                st.dataframe(det.tail(3000), use_container_width=True, hide_index=True)
+
+
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     df = load_draws()
@@ -1581,12 +1681,13 @@ def main():
         candidates = generate_candidates(pool_info, ml_nums, df, n_sample=4000)
 
     # Tabs
-    t1, t2, t3, t4, t5 = st.tabs([
+    t1, t2, t3, t4, t5, t6 = st.tabs([
         "🎯 PREDICI",
         "🔬 BACKTEST 100 draw",
         "📊 ANALISI",
         "🗄️ DATI & STORIA",
         "🧪 LABORATORIO",
+        "📈 STORICO STRATEGIE",
     ])
 
     with t1:
@@ -1599,6 +1700,8 @@ def main():
         tab_dati(df)
     with t5:
         tab_laboratorio(df)
+    with t6:
+        tab_storico_strategie()
 
 
 main()

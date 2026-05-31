@@ -618,6 +618,46 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
     log.info("Scritto: %s (%d righe)", path.name, len(df))
 
 
+def save_backtest_detail(bt: dict[str, pd.DataFrame], out_dir: Path) -> None:
+    """
+    Save two files:
+    1. latest_backtest_detail.csv  — one row per (draw × strategy): draw, strategia, hit_t0, best_hit, candidati
+    2. latest_strategy_comparison.csv — pivot: one row per draw, one column per strategy (hit_t0)
+    """
+    rows = []
+    for sname, df_s in bt.items():
+        if df_s.empty:
+            continue
+        for _, row in df_s.iterrows():
+            rows.append({
+                "draw":      int(row["draw"]),
+                "strategia": sname,
+                "hit_t0":    int(row["hit_t0"]) if pd.notna(row["hit_t0"]) else 0,
+                "hit_t1":    int(row["hit_t1"]) if pd.notna(row.get("hit_t1")) else None,
+                "best_hit":  int(row["best_hit"]),
+                "candidati": str(row["candidates"]),
+            })
+
+    if not rows:
+        return
+
+    detail = pd.DataFrame(rows).sort_values(["draw", "strategia"])
+    write_csv(detail, out_dir / "latest_backtest_detail.csv")
+
+    # Pivot: draw as index, strategy hit_t0 as columns
+    pivot = detail.pivot_table(index="draw", columns="strategia", values="hit_t0", aggfunc="first")
+    pivot.columns = [str(c) for c in pivot.columns]
+    pivot = pivot.reset_index()
+
+    # Add "winner" column (strategy with highest hit_t0 per draw; ties go to first alphabetically)
+    strat_cols = [c for c in pivot.columns if c != "draw"]
+    if strat_cols:
+        pivot["vincitore"] = pivot[strat_cols].idxmax(axis=1)
+        pivot["max_hit"] = pivot[strat_cols].max(axis=1)
+
+    write_csv(pivot, out_dir / "latest_strategy_comparison.csv")
+
+
 def run_once(args: argparse.Namespace) -> None:
     log.info("=" * 60)
     log.info("Magic Lab run — %s", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -656,6 +696,9 @@ def run_once(args: argparse.Namespace) -> None:
     # Cycle windows
     cycle_windows = compute_cycle_windows(bt, event_gaps)
     write_csv(cycle_windows, OUT_DIR / "latest_cycle_windows.csv")
+
+    # Detailed per-draw backtest results (all strategies)
+    save_backtest_detail(bt, OUT_DIR)
 
     # Next predictions
     next_preds = generate_next_predictions(df, args.freq_window, args.keep_top, ranking)
