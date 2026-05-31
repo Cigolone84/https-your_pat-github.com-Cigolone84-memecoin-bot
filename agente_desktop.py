@@ -75,48 +75,45 @@ SOURCE_WHITELIST = [
 ]
 
 SYSTEM_PROMPT = (
-    "Sei l'agente AI autonomo di Magic Dream — sistema di analisi statistica del lotto italiano"
-    " (Superenalotto / lotto 90 numeri).\n\n"
-    "=== STRUTTURA MAGIC DREAM ===\n"
+    "Sei l'agente AI autonomo di Magic Dream — sistema di analisi statistica del LOTTO POLACCO"
+    " (6/49: si estraggono 6 numeri da 1 a 49, tre volte a settimana).\n\n"
+    "ATTENZIONE: NON e' Superenalotto, NON e' lotto italiano 90 numeri. E' lotto polacco 6/49.\n\n"
+    "=== DUE SISTEMI PARALLELI ===\n"
+    "1. APP1 (lotto ML, porta 8601): modello ML Random Forest sul lotto polacco.\n"
+    "   Produce: ML Top-8 + Sestine 1-5 = pool di ~18-21 numeri.\n"
+    "   Il pool ha contenuto 5 numeri vincenti 35 volte e TUTTI E 6 una volta su 7000+ draw.\n"
+    "2. MAGIC DREAM (strategie statistiche, porta 8603): 8 strategie statistiche.\n"
+    "   La strategia PoolTop8 usa il pool di App1 e sceglie i migliori 8 numeri da quel pool.\n"
+    "   Connessione: migliore App1 => migliore pool => migliore PoolTop8 in Magic Dream.\n\n"
+    "=== STRUTTURA FILE ===\n"
     f"Cartella principale: {ROOT_DIR}\n"
     "- magic_dream_24_7.py: supervisor che mantiene App1+App2+App3 sempre attive\n"
-    "- magic_experiment_lab.py: worker background che genera previsioni (6 strategie)\n"
-    "- setup_magic_dream.py: copia file lotto e installa App3\n"
-    "- app3-lifecycle/app3.py: App3 Magic Dream (la dashboard principale)\n"
-    "- app1-app2-dashboard/lotto-dashboard/app.py: App1 dashboard lotto\n"
-    "- app1-app2-dashboard/lotto-dashboard/app2.py: App2 dashboard lotto\n"
-    "- magic_lab/: cartella output del worker (CSV con previsioni)\n"
+    "- magic_experiment_lab.py: worker background che genera previsioni (8 strategie)\n"
+    "- setup_magic_dream.py: copia file e installa App3\n"
+    "- app3-lifecycle/app3.py: App3 Magic Dream (dashboard principale)\n"
+    "- app1-app2-dashboard/lotto-dashboard/app.py: App1 (ML model)\n"
+    "- app1-app2-dashboard/lotto-dashboard/app2.py: App2\n"
+    "- magic_lab/: CSV con previsioni e backtest di Magic Dream\n"
     "- anthropic_api_key.txt: chiave API\n\n"
     "=== PORTE ===\n"
-    "- App1 (localhost:8601): dashboard lotto principale, pool candidati, previsioni ML\n"
-    "- App2 (localhost:8602): dashboard lotto secondaria, analisi backtest\n"
-    "- App3 (localhost:8603): Magic Dream Centro Operativo — lifecycle, strategie, Magic Lab\n\n"
-    "=== LOTTO ITALIANO — REGOLE BASE ===\n"
-    "- 90 numeri (1-90), si estraggono 5 per ruota\n"
-    "- 10 ruote: Bari, Cagliari, Firenze, Genova, Milano, Napoli, Palermo, Roma, Torino,"
-    " Venezia + Nazionale\n"
-    "- Estratto: 1 numero, Ambo: 2, Terno: 3, Quaterna: 4, Cinquina: 5\n"
-    "- Frequenze: ogni numero ha un ciclo storico di uscite e ritardi\n"
-    "- Ritardo: quante estrazioni fa da quando un numero non esce"
-    " (numero \"in ritardo\" = potenzialmente \"maturo\")\n\n"
-    "=== STRATEGIE MAGIC DREAM (7 strategie in magic_experiment_lab.py) ===\n"
-    "1. FreqHot8: i 8 numeri piu frequenti nell'ultima finestra di N draw\n"
+    "- App1 (localhost:8601): ML model, pool candidati, sestine, backtest ML\n"
+    "- App2 (localhost:8602): analisi secondaria\n"
+    "- App3 (localhost:8603): Magic Dream Centro Operativo — strategie statistiche\n\n"
+    "=== LOTTO POLACCO 6/49 — REGOLE ===\n"
+    "- 49 numeri (1-49), si estraggono 6 numeri per draw\n"
+    "- 3 draw a settimana\n"
+    "- Database storico: 7000+ draw dal 1957\n"
+    "- Hit: quanti dei 6 numeri estratti compaiono nella previsione\n"
+    "- Benchmark random 8 su 49: ~2.8% probabilita' di indovinare 3+\n\n"
+    "=== 8 STRATEGIE MAGIC DREAM (magic_experiment_lab.py) ===\n"
+    "1. FreqHot8: i 8 numeri piu frequenti nell'ultima finestra\n"
     "2. FreqCold8: i 8 numeri meno frequenti (teoria del recupero)\n"
     "3. HotCold4+4: mix 4 caldi + 4 freddi\n"
-    "4. Decade8: analisi per decade (1-9, 10-19, 20-29, 30-39, 40-49)\n"
+    "4. Decade8: bilanciamento per decade (1-9, 10-19, 20-29, 30-39, 40-49)\n"
     "5. Delay8: i 8 numeri con piu alto ritardo attuale\n"
     "6. NucleoPool: nucleo di numeri che co-appaiono frequentemente\n"
-    "7. Consensus8: vota su tutte le altre 5 strategie, prende i top-8 con piu voti\n"
-    "8. PoolTop8: i migliori 8 numeri DENTRO il pool di App1 (ML Top-8 + Sestine 1-5)\n"
-    "   QUESTA E' LA STRATEGIA PIU IMPORTANTE: il pool di App1 ha gia contenuto\n"
-    "   5 numeri vincenti 35 volte e TUTTI E 6 una volta su 7000+ draw storici.\n"
-    "   Migliore App1 => migliore pool => migliore PoolTop8 in Magic Dream.\n\n"
-    "=== CONNESSIONE APP1 -> MAGIC DREAM ===\n"
-    "App1 produce: ML Top-8 + Sestine 1-5 = pool di ~18-21 numeri\n"
-    "Magic Dream usa quel pool: PoolTop8 sceglie i migliori 8 da quel pool\n"
-    "Quindi: se l'utente vuole migliorare Magic Dream, migliorare App1 e' la via piu diretta.\n"
-    "Idee per migliorare App1: report ChatGPT sui numeri del pool, analisi esterne,\n"
-    "piu dati storici, segnali tecnici aggiuntivi.\n\n"
+    "7. Consensus8: voto di tutte le strategie, prende i top-8 piu votati\n"
+    "8. PoolTop8: i migliori 8 numeri DENTRO il pool ML di App1 — LA PIU' IMPORTANTE\n\n"
     "=== METRICHE RANKING ===\n"
     "- 'Hit >=3 T0 %': % di draw dove 3+ numeri indovinati ALLA PROSSIMA estrazione (metrica onesta)\n"
     "- 'Hit medio T0': media hit alla prossima estrazione\n"
@@ -124,49 +121,44 @@ SYSTEM_PROMPT = (
     "- Benchmark random: 2.8% (3+ su 8 numeri da 1-49)\n"
     "- Target minimo utile: >5% Hit >=3 T0\n\n"
     "=== OUTPUT MAGIC LAB (magic_lab/) ===\n"
-    "- latest_strategy_ranking.csv: ranking 7 strategie per hit rate T0\n"
-    "  colonne: Rank, Strategia, Draw valutati, Hit medio T0, Hit >=3 T0, Hit >=3 T0 %, Hit >=4 T0\n"
-    "- latest_next_predictions.csv: numeri previsti per il prossimo draw (colonne: Draw target, Strategia, Predizione)\n"
+    "- latest_strategy_ranking.csv: ranking 8 strategie per hit rate T0\n"
+    "- latest_next_predictions.csv: numeri previsti per il prossimo draw\n"
     "- latest_event_gaps.csv: gaps tra eventi 3/4/5/6+ (semaforo)\n"
-    "- latest_range_positions.csv: posizione ciclo attuale per strategia+evento\n"
-    "- latest_cycle_summary.csv: stats complete per strategia\n"
-    "- latest_cycle_windows.csv: finestre temporali dei cicli\n\n"
-    "=== SEMAFORO IN APP3 ===\n"
-    "- Verde (attivare): gap >= 75 percentile — momento ottimale per puntare\n"
+    "- latest_range_positions.csv: posizione ciclo attuale\n"
+    "- latest_strategy_comparison.csv: PIVOT draw x strategia — hit_t0 per ogni draw\n"
+    "- latest_backtest_detail.csv: dettaglio ogni draw per ogni strategia\n\n"
+    "=== CONFRONTO APP1 vs MAGIC DREAM ===\n"
+    "Usa il tool compare_systems per confrontare le performance dei due sistemi.\n"
+    "App1 ML: performance in backtest_ml_storico.xlsx (se disponibile) o dalla tab Backtest.\n"
+    "Magic Dream: performance in latest_strategy_ranking.csv e latest_strategy_comparison.csv.\n"
+    "PoolTop8 e' il ponte tra i due: usa il pool di App1 all'interno di Magic Dream.\n\n"
+    "=== SEMAFORO ===\n"
+    "- Verde (attivare): gap >= p75 — momento ottimale\n"
     "- Blu (monitorare forte): gap >= mediana\n"
-    "- Giallo (preparare): gap >= 25 percentile\n"
-    "- Rosso (non inseguire): gap basso — ciclo non maturo\n\n"
-    "=== BACKTEST ===\n"
-    "File: app1-app2-dashboard/lotto-dashboard/backtest_ml_storico.xlsx\n"
-    "- Walk-forward su 500 draw storici (no data leakage)\n"
-    "- Metrica principale: hit rate >= 3 numeri su 8 selezionati\n"
-    "- Benchmark random: ~2.8% (prob casuale di 3+ match da 8 su 90)\n"
-    "- Target realistico: >10% hit rate per essere utile\n\n"
+    "- Giallo (preparare): gap >= p25\n"
+    "- Rosso (non inseguire): gap basso\n\n"
     "=== DESKTOP PATHS ===\n"
     "Percorsi da esplorare con list_folder:\n"
-    "- C:\\Users\\serti\\OneDrive\\Desktop  (primo tentativo)\n"
-    "- C:\\Users\\serti\\Desktop            (fallback)\n"
+    "- C:\\Users\\serti\\OneDrive\\Desktop\n"
+    "- C:\\Users\\serti\\Desktop\n"
     "Cartelle lotto da cercare: 'lotto', '3 ml', 'lotto-dashboard'\n\n"
     "=== MEMORIA PERSISTENTE ===\n"
-    "Hai accesso a save_note/read_notes per ricordare trovate importanti tra una sessione e l'altra.\n"
-    "Salva sempre: percorso cartella lotto trovata, hit rate migliore, ultima analisi importante.\n"
-    "All'avvio, leggi prima le note per riprendere dal punto corretto.\n\n"
-    "=== WORKER magic_experiment_lab.py ===\n"
-    "Usa check_worker per vedere se sta girando e quando ha prodotto l'ultimo output.\n"
-    "Usa start_worker per avviarlo se non gira (serve ogni 3 ore per aggiornare i CSV).\n\n"
+    "Usa save_note/read_notes per ricordare scoperte tra una sessione e l'altra.\n"
+    "Salva: percorso lotto trovato, strategia top, hit rate migliore, risultato confronto sistemi.\n\n"
     "=== TUOI COMPITI AUTONOMI ===\n"
-    "1. Monitora le 3 app ogni 5 minuti — se offline, avvisa e diagnoza\n"
+    "1. Monitora le 3 app ogni 5 minuti\n"
     "2. Leggi i CSV di Magic Lab e interpreta i risultati\n"
-    "3. Quando hai dati sufficienti, analizza le performance delle strategie\n"
-    "4. Suggerisci miglioramenti al codice (magic_experiment_lab.py) ogni 6 ore\n"
-    "5. Riferisci all'utente solo i risultati finali, non i dettagli tecnici\n\n"
+    "3. Confronta App1 vs Magic Dream con compare_systems\n"
+    "4. Suggerisci miglioramenti a magic_experiment_lab.py ogni 6 ore\n"
+    "5. Riferisci solo i risultati finali, non i dettagli tecnici\n\n"
     "=== COMPORTAMENTO ===\n"
     "- Parla SEMPRE in italiano\n"
-    "- Messaggi brevi e diretti — l'utente vuole fatti, non spiegazioni\n"
+    "- Messaggi brevi e diretti\n"
     "- Agisci prima, riferisci dopo\n"
-    "- Non chiedere conferma per azioni di monitoraggio/lettura\n"
+    "- NON chiedere conferma per letture/monitoraggio\n"
     "- Chiedi conferma solo prima di modificare file Python\n"
-    "- Salva le note delle scoperte importanti con save_note\n"
+    "- Scrivi sempre MAGIC DREAM, mai 'lotto generico'\n"
+    "- NON dire mai che 5 o 6 numeri sono impossibili — i dati storici provano che e' successo\n"
 )
 
 TOOLS = [
@@ -304,6 +296,14 @@ TOOLS = [
     {
         "name": "start_worker",
         "description": "Avvia magic_experiment_lab.py in background per aggiornare i CSV di Magic Lab.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "compare_systems",
+        "description": (
+            "Confronta le performance di App1 (ML lotto) vs Magic Dream (strategie statistiche). "
+            "Legge latest_strategy_ranking.csv, latest_strategy_comparison.csv e backtest_ml_storico.xlsx."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
@@ -550,6 +550,93 @@ def tool_start_worker() -> str:
         return f"❌ Errore avvio worker: {e}"
 
 
+def tool_compare_systems() -> str:
+    """Confronta App1 (ML) vs Magic Dream (statistiche) leggendo i CSV disponibili."""
+    import csv as csvmod
+    from collections import Counter
+    lines = []
+
+    # ── Magic Dream: strategy ranking ────────────────────────────────────────
+    rank_path = MAGIC_LAB_DIR / "latest_strategy_ranking.csv"
+    if rank_path.exists():
+        try:
+            rows = list(csvmod.DictReader(rank_path.open(encoding="utf-8")))
+            lines.append("=== MAGIC DREAM — Ranking strategie (hit_t0) ===")
+            for r in rows:
+                strat = r.get("Strategia", "?")
+                pct   = r.get("Hit >=3 T0 %", "?")
+                medio = r.get("Hit medio T0", "?")
+                rank  = r.get("Rank", "?")
+                lines.append(f"  {rank}. {strat}: {pct} (media T0: {medio})")
+            lines.append(f"  Benchmark random: 2.8%")
+        except Exception as e:
+            lines.append(f"Errore lettura ranking: {e}")
+    else:
+        lines.append("Magic Dream ranking: non disponibile (Magic Lab non ha ancora girato)")
+
+    # ── Magic Dream: per-draw comparison ─────────────────────────────────────
+    cmp_path = MAGIC_LAB_DIR / "latest_strategy_comparison.csv"
+    if cmp_path.exists():
+        try:
+            rows = list(csvmod.DictReader(cmp_path.open(encoding="utf-8")))
+            total = len(rows)
+            lines.append(f"\n=== MAGIC DREAM — Confronto per draw ({total} draw) ===")
+            if rows and "vincitore" in rows[0]:
+                wins = Counter(r.get("vincitore", "") for r in rows if r.get("vincitore"))
+                lines.append("Vittorie per strategia:")
+                for s, n in wins.most_common():
+                    lines.append(f"  {s}: {n} ({n/total*100:.1f}%)")
+            if rows and "max_hit" in rows[0]:
+                for threshold in [3, 4, 5, 6]:
+                    n = sum(1 for r in rows if r.get("max_hit") and float(r["max_hit"]) >= threshold)
+                    lines.append(f"  Draw con {threshold}+ hit: {n} ({n/total*100:.1f}%)")
+        except Exception as e:
+            lines.append(f"Errore lettura comparison: {e}")
+
+    # ── App1 (ML): cerca backtest_ml_storico.xlsx ─────────────────────────────
+    lines.append("\n=== APP1 (ML lotto polacco) ===")
+    bt_candidates = [
+        ROOT_DIR / "app1-app2-dashboard" / "lotto-dashboard" / "backtest_ml_storico.xlsx",
+        ROOT_DIR / "app1-app2-dashboard" / "backtest_ml_storico.xlsx",
+    ]
+    bt_found = False
+    for bt_path in bt_candidates:
+        if bt_path.exists():
+            lines.append(f"Backtest ML trovato: {bt_path.name}")
+            try:
+                import pandas as _pd
+                df = _pd.read_excel(bt_path)
+                lines.append(f"Righe: {len(df)} | Colonne: {list(df.columns[:8])}")
+                hit_cols = [c for c in df.columns if any(k in str(c).lower() for k in ["hit", "pool", "match", "score"])]
+                if hit_cols:
+                    for c in hit_cols[:4]:
+                        try:
+                            col = _pd.to_numeric(df[c], errors="coerce").dropna()
+                            if len(col):
+                                lines.append(f"  {c}: media={col.mean():.3f}, max={col.max()}, >=3: {(col>=3).sum()} ({(col>=3).mean()*100:.1f}%)")
+                        except Exception:
+                            pass
+                else:
+                    lines.append("  (colonne hit non identificate automaticamente)")
+            except Exception as e:
+                lines.append(f"  Errore lettura: {e}")
+            bt_found = True
+            break
+    if not bt_found:
+        lines.append("backtest_ml_storico.xlsx non trovato.")
+        lines.append("Dati pool App1 da backtest storico:")
+        lines.append("  Pool (ML Top-8 + Sestine): 5 numeri vincenti 35x su 7000 draw (0.5%)")
+        lines.append("  Pool: 6 numeri vincenti 1x su 7000 draw (0.01%)")
+        lines.append("  PoolTop8 (Magic Dream) usa questo pool => stessa base di App1")
+
+    lines.append("\n=== CONCLUSIONE ===")
+    lines.append("PoolTop8 = ponte tra App1 e Magic Dream.")
+    lines.append("Migliorare App1 => migliora direttamente PoolTop8 in Magic Dream.")
+    lines.append("Per confronto completo App1: apri App1 tab 'Backtest 100 draw'.")
+
+    return "\n".join(lines)
+
+
 def execute_tool(name: str, inp: dict) -> str:
     try:
         if name == "check_status":
@@ -580,6 +667,8 @@ def execute_tool(name: str, inp: dict) -> str:
             return tool_check_worker()
         elif name == "start_worker":
             return tool_start_worker()
+        elif name == "compare_systems":
+            return tool_compare_systems()
         return f"Strumento sconosciuto: {name}"
     except Exception as e:
         return f"Errore {name}: {e}"
@@ -734,8 +823,9 @@ def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
         "Sei un analista statistico del lotto italiano esperto di Machine Learning.\n\n"
         "Ecco i risultati prodotti da Magic Lab (CSV):\n\n"
         f"{csv_data}\n\n"
-        "Analizza i risultati delle 6 strategie (FreqHot8, FreqCold8, HotCold4+4, Decade8,"
-        " Delay8, NucleoPool). Identifica:\n"
+        "Analizza i risultati delle 8 strategie (FreqHot8, FreqCold8, HotCold4+4, Decade8,"
+        " Delay8, NucleoPool, Consensus8, PoolTop8). PoolTop8 usa il pool ML di App1 ed"
+        " e' la strategia piu importante. Identifica:\n"
         "1. Quale strategia performa meglio e perche\n"
         "2. Quali strategie sono sotto il benchmark (~2.8% hit rate per 3+ su 8)\n"
         "3. Cosa migliorare concretamente nel codice Python\n"
@@ -768,7 +858,7 @@ def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
         "Basandoti sull'analisi, riscrivi magic_experiment_lab.py COMPLETO con le migliorie integrate.\n"
         "OBBLIGATORIO:\n"
         "- Restituisci IL FILE COMPLETO, non frammenti\n"
-        "- Il file deve contenere TUTTE le 6 strategie: FreqHot8, FreqCold8, HotCold4, Decade8, Delay8, NucleoPool\n"
+        "- Il file deve contenere TUTTE le 8 strategie: FreqHot8, FreqCold8, HotCold4, Decade8, Delay8, NucleoPool, Consensus8, PoolTop8\n"
         "- Mantieni la struttura generale e le interfacce esistenti\n"
         "- Il codice deve essere Python valido e sintatticamente corretto\n"
         "- Se l'analisi non giustifica modifiche, scrivi solo: NESSUNA_MODIFICA\n"
@@ -917,6 +1007,12 @@ class AgentApp:
             ("📋 Log",        lambda: self._send("Mostrami gli ultimi log.")),
             ("⬇️ Aggiorna",  lambda: self._send("Aggiorna Magic Dream da GitHub.")),
             ("🌐 Apri App3",  lambda: self._send("Apri App3 nel browser.")),
+            ("🆚 Confronta",  lambda: self._send(
+                "Confronta App1 (ML lotto) vs Magic Dream (strategie statistiche). "
+                "Usa il tool compare_systems e dimmi quale dei due sistemi performa meglio, "
+                "con numeri concreti. Includi quale strategia vince di piu' e "
+                "se PoolTop8 in Magic Dream batte il modello ML puro di App1."
+            )),
             ("🔬 Migliora",   self._trigger_improvement),
         ]
 
@@ -1124,17 +1220,17 @@ class AgentApp:
                 f"2. Usa list_folder su questi percorsi Desktop nell'ordine finche' uno funziona:\n{desktop_paths}\n"
                 "3. Trova la cartella lotto originale ('lotto' o '3 ml') e leggine il contenuto\n"
                 "4. Verifica il worker: se fermo da piu di 3 ore, avvialo con start_worker\n"
-                "5. Leggi latest_strategy_ranking.csv — quale strategia ha il miglior 'Hit >=3 T0 %'?\n"
-                "6. Leggi latest_next_predictions.csv — mostra i numeri PoolTop8 E Consensus8\n"
-                "7. Leggi latest_range_positions.csv — semaforo attuale\n"
-                "8. Salva riassunto con save_note: strategia top, numeri PoolTop8, numeri Consensus8, semaforo\n"
-                "9. Scrivi messaggio BREVE all'utente (MAGIC DREAM non lotto):\n"
-                "   - Stato sistema\n"
-                "   - PoolTop8: numeri dal pool App1 (ML Top-8 + Sestine) — la strategia piu forte\n"
-                "   - Consensus8: numeri di consenso\n"
-                "   - Overlap tra PoolTop8 e Consensus8 = massima confidenza\n"
-                "   - Semaforo e raccomandazione\n"
-                "   - Ricorda: si parla sempre di MAGIC DREAM, mai di lotto generico\n"
+                "5. Usa compare_systems per confrontare App1 (ML) vs Magic Dream (statistiche)\n"
+                "6. Leggi latest_strategy_ranking.csv — quale strategia ha il miglior 'Hit >=3 T0 %'?\n"
+                "7. Leggi latest_next_predictions.csv — mostra i numeri PoolTop8 E Consensus8\n"
+                "8. Leggi latest_range_positions.csv — semaforo attuale\n"
+                "9. Salva riassunto con save_note: risultato confronto, strategia top, numeri PoolTop8, semaforo\n"
+                "10. Scrivi messaggio BREVE all'utente (scrivi sempre MAGIC DREAM):\n"
+                "    - Confronto App1 vs Magic Dream: quale performa meglio con numeri concreti\n"
+                "    - PoolTop8: numeri dal pool App1 — la strategia piu forte\n"
+                "    - Consensus8: numeri di consenso\n"
+                "    - Overlap PoolTop8 & Consensus8 = massima confidenza\n"
+                "    - Semaforo e raccomandazione\n"
                 "NON chiedere conferma. Solo il risultato.",
             ),
             daemon=True,
