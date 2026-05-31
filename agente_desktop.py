@@ -59,6 +59,14 @@ PORTS = {"App 1": 8601, "App 2": 8602, "App 3": 8603}
 MONITOR_INTERVAL = 300    # 5 minuti tra un check e l'altro
 STARTUP_DELAY = 10        # secondi prima del primo check automatico
 IMPROVE_INTERVAL = 21600  # 6 ore tra cicli di miglioramento automatici
+MAX_HISTORY_EXCHANGES = 3  # scambi completi da tenere in memoria
+
+DESKTOP_CANDIDATES = [
+    Path(r"C:\Users\serti\OneDrive\Desktop"),
+    Path(r"C:\Users\serti\Desktop"),
+    Path(r"C:\Users\Public\Desktop"),
+]
+AGENT_NOTES_FILE = MAGIC_LAB_DIR / "agent_notes.txt"
 
 # Whitelist per read_source_code
 SOURCE_WHITELIST = [
@@ -117,11 +125,23 @@ SYSTEM_PROMPT = (
     "- Metrica principale: hit rate >= 3 numeri su 8 selezionati\n"
     "- Benchmark random: ~2.8% (prob casuale di 3+ match da 8 su 90)\n"
     "- Target realistico: >10% hit rate per essere utile\n\n"
+    "=== DESKTOP PATHS ===\n"
+    "Percorsi da esplorare con list_folder:\n"
+    "- C:\\Users\\serti\\OneDrive\\Desktop  (primo tentativo)\n"
+    "- C:\\Users\\serti\\Desktop            (fallback)\n"
+    "Cartelle lotto da cercare: 'lotto', '3 ml', 'lotto-dashboard'\n\n"
+    "=== MEMORIA PERSISTENTE ===\n"
+    "Hai accesso a save_note/read_notes per ricordare trovate importanti tra una sessione e l'altra.\n"
+    "Salva sempre: percorso cartella lotto trovata, hit rate migliore, ultima analisi importante.\n"
+    "All'avvio, leggi prima le note per riprendere dal punto corretto.\n\n"
+    "=== WORKER magic_experiment_lab.py ===\n"
+    "Usa check_worker per vedere se sta girando e quando ha prodotto l'ultimo output.\n"
+    "Usa start_worker per avviarlo se non gira (serve ogni 3 ore per aggiornare i CSV).\n\n"
     "=== TUOI COMPITI AUTONOMI ===\n"
     "1. Monitora le 3 app ogni 5 minuti — se offline, avvisa e diagnoza\n"
     "2. Leggi i CSV di Magic Lab e interpreta i risultati\n"
     "3. Quando hai dati sufficienti, analizza le performance delle strategie\n"
-    "4. Suggerisci miglioramenti al codice (magic_experiment_lab.py)\n"
+    "4. Suggerisci miglioramenti al codice (magic_experiment_lab.py) ogni 6 ore\n"
     "5. Riferisci all'utente solo i risultati finali, non i dettagli tecnici\n\n"
     "=== COMPORTAMENTO ===\n"
     "- Parla SEMPRE in italiano\n"
@@ -129,6 +149,7 @@ SYSTEM_PROMPT = (
     "- Agisci prima, riferisci dopo\n"
     "- Non chiedere conferma per azioni di monitoraggio/lettura\n"
     "- Chiedi conferma solo prima di modificare file Python\n"
+    "- Salva le note delle scoperte importanti con save_note\n"
 )
 
 TOOLS = [
@@ -225,7 +246,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Percorso completo del file"},
-                "max_lines": {"type": "integer", "description": "Righe max da leggere (default 150)"}
+                "max_lines": {"type": "integer", "description": "Righe max da leggere (default 300)"}
             },
             "required": ["path"],
         },
@@ -241,6 +262,32 @@ TOOLS = [
             },
             "required": ["path", "content"],
         },
+    },
+    {
+        "name": "save_note",
+        "description": "Salva una nota persistente. Usa per ricordare scoperte importanti tra una sessione e l'altra.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Testo della nota da salvare"}
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "read_notes",
+        "description": "Legge le note salvate nelle sessioni precedenti.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "check_worker",
+        "description": "Verifica se magic_experiment_lab.py sta girando e quando ha prodotto l'ultimo output.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "start_worker",
+        "description": "Avvia magic_experiment_lab.py in background per aggiornare i CSV di Magic Lab.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -395,7 +442,7 @@ def _tool_list_folder(path: str) -> str:
         return f"Errore list_folder: {e}"
 
 
-def _tool_read_file(path: str, max_lines: int = 150) -> str:
+def _tool_read_file(path: str, max_lines: int = 300) -> str:
     try:
         p = Path(path)
         if not p.exists():
@@ -426,6 +473,66 @@ def _tool_write_file(path: str, content: str) -> str:
         return f"Errore write_file: {e}"
 
 
+def tool_save_note(text: str) -> str:
+    try:
+        MAGIC_LAB_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+        entry = f"\n=== {timestamp} ===\n{text.strip()}\n"
+        with AGENT_NOTES_FILE.open("a", encoding="utf-8") as f:
+            f.write(entry)
+        return "✅ Nota salvata."
+    except Exception as e:
+        return f"Errore save_note: {e}"
+
+
+def tool_read_notes() -> str:
+    if not AGENT_NOTES_FILE.exists():
+        return "Nessuna nota salvata — prima sessione."
+    text = AGENT_NOTES_FILE.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    return "\n".join(lines[-60:]) if lines else "(vuoto)"
+
+
+def tool_check_worker() -> str:
+    result = []
+    if MAGIC_LAB_DIR.exists():
+        csvs = sorted(MAGIC_LAB_DIR.glob("*.csv"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if csvs:
+            latest = csvs[0]
+            age_min = (time.time() - latest.stat().st_mtime) / 60
+            result.append(f"Ultimo CSV: {latest.name} ({age_min:.0f} min fa)")
+            result.append("✅ Worker attivo" if age_min < 200 else "⚠️ Worker forse stoppato (output > 3h fa)")
+        else:
+            result.append("⚠️ Nessun CSV — worker non ha ancora girato")
+    else:
+        result.append("⚠️ magic_lab/ non esiste ancora")
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=10,
+        )
+        n = max(0, r.stdout.lower().count("python.exe") - 1)
+        result.append(f"Processi python.exe attivi: {n}")
+    except Exception:
+        pass
+    return "\n".join(result)
+
+
+def tool_start_worker() -> str:
+    if not WORKER_FILE.exists():
+        return f"❌ {WORKER_FILE.name} non trovato"
+    try:
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        subprocess.Popen(
+            [sys.executable, str(WORKER_FILE), "--loop", "--interval-minutes", "180"],
+            cwd=str(ROOT_DIR),
+            creationflags=flags,
+        )
+        return "✅ Worker avviato in background — output in magic_lab/ (prima esecuzione dopo ~3 min)"
+    except Exception as e:
+        return f"❌ Errore avvio worker: {e}"
+
+
 def execute_tool(name: str, inp: dict) -> str:
     try:
         if name == "check_status":
@@ -448,6 +555,14 @@ def execute_tool(name: str, inp: dict) -> str:
             return _tool_write_file(inp.get("path", ""), inp.get("content", ""))
         elif name == "read_source_code":
             return tool_read_source_code(inp.get("filename", ""))
+        elif name == "save_note":
+            return tool_save_note(inp.get("text", ""))
+        elif name == "read_notes":
+            return tool_read_notes()
+        elif name == "check_worker":
+            return tool_check_worker()
+        elif name == "start_worker":
+            return tool_start_worker()
         return f"Strumento sconosciuto: {name}"
     except Exception as e:
         return f"Errore {name}: {e}"
@@ -455,36 +570,45 @@ def execute_tool(name: str, inp: dict) -> str:
 
 # ── Claude agentic loop ─────────────────────────────────────────────────────
 
+def _trim_history(history: list, max_exchanges: int = MAX_HISTORY_EXCHANGES) -> list:
+    """Keep last max_exchanges complete user/assistant pairs (end_turn only — no tool sequences)."""
+    pairs: list[list] = []
+    i = len(history) - 1
+    while i > 0 and len(pairs) < max_exchanges:
+        if history[i].get("role") == "assistant" and history[i - 1].get("role") == "user":
+            pairs.insert(0, history[i - 1: i + 1])
+            i -= 2
+        else:
+            i -= 1
+    return [msg for pair in pairs for msg in pair]
+
+
 def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
     """
     Returns (reply_text, updated_history).
 
-    History policy: only the LAST complete user/assistant exchange is kept
-    to avoid corruption from tool_use sequences cut mid-flight.
-    On API 400 (BadRequestError) the history is discarded and the message
-    is retried from scratch.
+    History: keeps last MAX_HISTORY_EXCHANGES complete exchanges (end_turn pairs).
+    On API 400 (BadRequestError) retries from scratch with no history.
     """
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Build initial message list — history + current user turn
-    messages = history + [{"role": "user", "content": message}]
+    messages = _trim_history(history) + [{"role": "user", "content": message}]
 
-    for _ in range(10):  # max 10 tool rounds
+    for _ in range(15):  # max 15 tool rounds
         try:
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=2048,
+                max_tokens=4096,
                 system=SYSTEM_PROMPT,
                 tools=TOOLS,
                 messages=messages,
             )
         except anthropic.BadRequestError:
-            # History is corrupted — retry from scratch with no history
             messages = [{"role": "user", "content": message}]
             resp = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=2048,
+                max_tokens=4096,
                 system=SYSTEM_PROMPT,
                 tools=TOOLS,
                 messages=messages,
@@ -492,12 +616,12 @@ def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
 
         if resp.stop_reason == "end_turn":
             text = "".join(b.text for b in resp.content if hasattr(b, "text"))
-            # Keep only the last complete exchange to prevent corruption
-            clean_hist = [
+            new_exchange = [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": resp.content},
             ]
-            return text, clean_hist
+            updated_hist = _trim_history(history) + new_exchange
+            return text, updated_hist
 
         if resp.stop_reason == "tool_use":
             results = []
@@ -515,7 +639,7 @@ def run_agent(message: str, api_key: str, history: list) -> tuple[str, list]:
         else:
             break
 
-    return "Errore: risposta inattesa dall'API.", []
+    return "Errore: risposta inattesa dall'API.", history
 
 
 # ── Improvement cycle ───────────────────────────────────────────────────────
@@ -613,7 +737,9 @@ def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
         msg_queue.put(("agent", f"❌ Errore nella fase di analisi: {e}"))
         return
 
-    msg_queue.put(("agent", "📊 Analisi completata. Developer sta scrivendo il codice..."))
+    # Mostra l'analisi all'utente in modo sintetico
+    analysis_preview = "\n".join(analysis.splitlines()[:8])
+    msg_queue.put(("agent", f"📊 Analisi:\n{analysis_preview}\n\nDeveloper sta scrivendo il codice..."))
 
     # --- Chiamata 2: Developer ---
     developer_prompt = (
@@ -622,13 +748,14 @@ def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
         f"{analysis}\n\n"
         "=== CODICE ATTUALE DI magic_experiment_lab.py ===\n"
         f"{source_code}\n\n"
-        "Basandoti sull'analisi, proponi SOLO le modifiche Python specifiche che migliorano"
-        " le strategie di Magic Dream. Requisiti:\n"
-        "- Fornisci il codice completo della/e funzione/i modificata/e (non frammenti)\n"
+        "Basandoti sull'analisi, riscrivi magic_experiment_lab.py COMPLETO con le migliorie integrate.\n"
+        "OBBLIGATORIO:\n"
+        "- Restituisci IL FILE COMPLETO, non frammenti\n"
+        "- Il file deve contenere TUTTE le 6 strategie: FreqHot8, FreqCold8, HotCold4, Decade8, Delay8, NucleoPool\n"
+        "- Mantieni la struttura generale e le interfacce esistenti\n"
         "- Il codice deve essere Python valido e sintatticamente corretto\n"
-        "- Non modificare la struttura generale del file, solo le strategie\n"
         "- Se l'analisi non giustifica modifiche, scrivi solo: NESSUNA_MODIFICA\n"
-        "Rispondi SOLO con codice Python (nessun testo prima o dopo),"
+        "Rispondi SOLO con il file Python completo (nessun testo prima o dopo),"
         " oppure NESSUNA_MODIFICA."
     )
     try:
@@ -670,11 +797,20 @@ def run_improvement_cycle(api_key: str, msg_queue: "queue.Queue") -> None:
         msg_queue.put((
             "agent",
             f"❌ Codice proposto non valido (SyntaxError: {e})"
-            " — analisi salvata in magic_lab/last_analysis.txt",
+            " — nessuna modifica applicata",
         ))
-        _save_analysis(
-            analysis + f"\n\n--- CODICE PROPOSTO (NON VALIDO) ---\n{proposed_code}"
-        )
+        _save_analysis(analysis + f"\n\n--- CODICE PROPOSTO (NON VALIDO) ---\n{proposed_code}")
+        return
+
+    # --- Controllo simboli chiave ---
+    REQUIRED_SYMBOLS = ["FreqHot8", "FreqCold8", "HotCold4", "Decade8", "Delay8", "NucleoPool"]
+    missing = [s for s in REQUIRED_SYMBOLS if s not in proposed_code]
+    if missing:
+        msg_queue.put((
+            "agent",
+            f"❌ File proposto manca di: {missing} — nessuna modifica applicata (sicurezza)",
+        ))
+        _save_analysis(analysis + f"\n\n--- CODICE RIFIUTATO (simboli mancanti: {missing}) ---\n")
         return
 
     # --- Backup e applicazione ---
@@ -954,16 +1090,28 @@ class AgentApp:
             return
         status = tool_check_status()
         lab_data = tool_read_magic_lab()
+        notes = tool_read_notes()
+        worker_status = tool_check_worker()
+
+        # Trova il primo desktop esistente
+        desktop_paths = "\n".join(str(p) for p in DESKTOP_CANDIDATES)
+
         threading.Thread(
             target=self._agent_thread,
             args=(
-                f"Sei appena avviato. Stato app:\n{status}\n\nMagic Lab:\n{lab_data}\n\n"
-                "COMPITI (falli tutti in sequenza senza aspettare input):\n"
-                "1. Usa list_folder su C:\\Users\\serti\\OneDrive\\Desktop per trovare tutte le cartelle\n"
-                "2. Trova la cartella lotto originale (es. 'lotto' o '3 ml') ed esplorane il contenuto\n"
-                "3. Leggi magic_experiment_lab.py con read_source_code per capire le strategie attuali\n"
-                "4. Analizza i CSV in magic_lab/ — quale strategia ha il hit rate più alto?\n"
-                "5. Dammi un report: cosa hai trovato, confronto lotto vs Magic Dream, cosa migliorare\n"
+                f"Sei appena avviato. Stato app:\n{status}\n\n"
+                f"Worker:\n{worker_status}\n\n"
+                f"Magic Lab:\n{lab_data}\n\n"
+                f"Note sessioni precedenti:\n{notes}\n\n"
+                "COMPITI (eseguili in sequenza senza aspettare input):\n"
+                f"1. Leggi le note precedenti qui sopra — ricorda cosa sai già\n"
+                f"2. Prova list_folder sui questi percorsi Desktop (nell'ordine) finché uno funziona:\n"
+                f"{desktop_paths}\n"
+                "3. Trova la cartella lotto originale (es. 'lotto' o '3 ml') ed esplorane il contenuto\n"
+                "4. Verifica lo stato del worker — se fermo, avvialo con start_worker\n"
+                "5. Analizza i CSV in magic_lab/ — quale strategia ha il hit rate più alto?\n"
+                "6. Salva le scoperte importanti con save_note (percorso lotto trovato, hit rate migliore)\n"
+                "7. Dammi un report finale: stato sistemi, confronto strategie, cosa migliorare\n"
                 "Agisci in autonomia, non chiedere conferma.",
             ),
             daemon=True,
