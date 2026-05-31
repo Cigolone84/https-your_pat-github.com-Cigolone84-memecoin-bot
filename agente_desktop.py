@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -155,6 +156,41 @@ TOOLS = [
             "required": ["app"],
         },
     },
+    {
+        "name": "list_folder",
+        "description": "Elenca il contenuto di una cartella sul PC. Usa per esplorare Desktop, Magic Dream, cartella lotto, ecc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Percorso cartella, es: C:\\Users\\serti\\OneDrive\\Desktop"}
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Legge il contenuto di un file (.py, .csv, .txt, .bat, .log, ecc.)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Percorso completo del file"},
+                "max_lines": {"type": "integer", "description": "Righe massime da leggere (default 150)"}
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Scrive o sovrascrive un file dentro la cartella Magic Dream (crea backup automatico). Usa per migliorare il codice.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Percorso file (deve essere dentro Magic Dream)"},
+                "content": {"type": "string", "description": "Contenuto completo del file"}
+            },
+            "required": ["path", "content"],
+        },
+    },
 ]
 
 
@@ -257,6 +293,58 @@ def tool_open_browser(app: str) -> str:
     return f"Browser aperto su {url}"
 
 
+def tool_list_folder(path: str) -> str:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return f"Cartella non trovata: {path}"
+        if not p.is_dir():
+            return f"Non è una cartella: {path}"
+        items = []
+        for item in sorted(p.iterdir()):
+            if item.is_dir():
+                sub = len(list(item.iterdir())) if item.is_dir() else 0
+                items.append(f"📁 {item.name}/  ({sub} elementi)")
+            else:
+                size = item.stat().st_size
+                mtime = datetime.fromtimestamp(item.stat().st_mtime).strftime("%d/%m %H:%M")
+                items.append(f"📄 {item.name}  ({size}B, {mtime})")
+        return f"{path}  ({len(items)} elementi):\n" + "\n".join(items)
+    except Exception as e:
+        return f"Errore: {e}"
+
+
+def tool_read_file(path: str, max_lines: int = 150) -> str:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return f"File non trovato: {path}"
+        allowed = {'.py', '.txt', '.csv', '.json', '.md', '.bat', '.log', '.ini', '.cfg'}
+        if p.suffix.lower() not in allowed:
+            return f"Tipo file non supportato per lettura: {p.suffix}"
+        text = p.read_text(encoding='utf-8', errors='replace')
+        lines = text.splitlines()
+        preview = "\n".join(lines[:max_lines])
+        suffix = f"\n... ({len(lines) - max_lines} righe omesse)" if len(lines) > max_lines else ""
+        return f"{path}  ({len(lines)} righe):\n{preview}{suffix}"
+    except Exception as e:
+        return f"Errore: {e}"
+
+
+def tool_write_file(path: str, content: str) -> str:
+    try:
+        p = Path(path).resolve()
+        if not str(p).startswith(str(ROOT_DIR.resolve())):
+            return f"Scrittura consentita solo dentro Magic Dream: {ROOT_DIR}"
+        if p.exists():
+            shutil.copy2(str(p), str(p.with_suffix(p.suffix + ".bak")))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding='utf-8')
+        return f"✅ Salvato: {p}"
+    except Exception as e:
+        return f"Errore: {e}"
+
+
 def execute_tool(name: str, inp: dict) -> str:
     try:
         if name == "check_status":
@@ -271,6 +359,12 @@ def execute_tool(name: str, inp: dict) -> str:
             return tool_run_setup()
         elif name == "open_browser":
             return tool_open_browser(inp.get("app", "App 1"))
+        elif name == "list_folder":
+            return tool_list_folder(inp.get("path", str(ROOT_DIR)))
+        elif name == "read_file":
+            return tool_read_file(inp.get("path", ""), inp.get("max_lines", 150))
+        elif name == "write_file":
+            return tool_write_file(inp.get("path", ""), inp.get("content", ""))
         return f"Strumento sconosciuto: {name}"
     except Exception as e:
         return f"Errore {name}: {e}"
@@ -541,24 +635,26 @@ class AgentApp:
         lab_data = tool_read_magic_lab()
         log_tail = tool_read_log(20)
 
-        startup_msg = f"""Sei appena stato avviato. Ecco lo stato completo del sistema:
+        startup_msg = f"""Sei appena avviato. Hai ora gli strumenti per esplorare il PC.
 
 STATO APP:
 {status}
 
-MAGIC LAB (output strategie):
+MAGIC LAB CSV:
 {lab_data}
 
-ULTIMI LOG:
+LOG:
 {log_tail}
 
-Il tuo compito adesso:
-1. Analizza i dati di Magic Lab — quali strategie stanno performando meglio?
-2. Ci sono pattern nei numeri previsti che si ripetono tra strategie diverse?
-3. Cosa consigli di migliorare nelle strategie per aumentare il hit rate?
-4. Dammi un report conciso con le tue conclusioni e 1-2 azioni concrete da fare.
+COMPITI IMMEDIATI (falli in ordine, usa i tool):
+1. Usa list_folder su C:\\Users\\serti\\OneDrive\\Desktop per vedere tutte le cartelle
+2. Trova la cartella lotto originale (probabilmente "lotto" o "3 ml" sul Desktop)
+3. Leggi i file Python principali della cartella Magic Dream (magic_experiment_lab.py)
+4. Confronta le strategie Magic Dream con quello che trovi nella cartella lotto originale
+5. Analizza i CSV in magic_lab/ e dimmi quali strategie performano meglio
+6. Fornisci un report all'utente: cosa hai trovato, cosa funziona, cosa migliorare
 
-Parla direttamente all'utente in italiano, senza tecnicismi."""
+Lavora in autonomia. Non chiedere conferma all'utente — esplora, leggi, analizza e poi riferisci i risultati."""
 
         threading.Thread(
             target=self._agent_thread,
