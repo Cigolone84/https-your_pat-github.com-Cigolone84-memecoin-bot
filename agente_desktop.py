@@ -51,8 +51,9 @@ GITHUB_FILES = [
 
 PORTS = {"App 1": 8601, "App 2": 8602, "App 3": 8603}
 
-MONITOR_INTERVAL = 300  # 5 minuti tra un check e l'altro
-STARTUP_DELAY = 10      # secondi prima del primo check automatico
+MONITOR_INTERVAL = 300   # 5 minuti tra un check salute app
+ANALYSIS_INTERVAL = 21600  # 6 ore tra un'analisi autonoma e l'altra
+STARTUP_DELAY = 10       # secondi prima del primo check automatico
 
 SYSTEM_PROMPT = (
 """Sei l'agente AI autonomo di Magic Dream. Conosci TUTTO il sistema.
@@ -535,38 +536,83 @@ class AgentApp:
             status = tool_check_status()
             self.msg_queue.put(("agent", "Stato attuale:\n" + status))
             return
-        # Ask agent to do an autonomous startup check
+        # Raccoglie tutto il contesto disponibile e lo manda a Claude
+        status = tool_check_status()
+        lab_data = tool_read_magic_lab()
+        log_tail = tool_read_log(20)
+
+        startup_msg = f"""Sei appena stato avviato. Ecco lo stato completo del sistema:
+
+STATO APP:
+{status}
+
+MAGIC LAB (output strategie):
+{lab_data}
+
+ULTIMI LOG:
+{log_tail}
+
+Il tuo compito adesso:
+1. Analizza i dati di Magic Lab — quali strategie stanno performando meglio?
+2. Ci sono pattern nei numeri previsti che si ripetono tra strategie diverse?
+3. Cosa consigli di migliorare nelle strategie per aumentare il hit rate?
+4. Dammi un report conciso con le tue conclusioni e 1-2 azioni concrete da fare.
+
+Parla direttamente all'utente in italiano, senza tecnicismi."""
+
         threading.Thread(
             target=self._agent_thread,
-            args=("Sei appena stato avviato. Controlla lo stato di tutte le app e dimmi se tutto è a posto. Sii breve.",),
+            args=(startup_msg,),
             daemon=True,
         ).start()
 
     def _monitor_loop(self) -> None:
-        time.sleep(STARTUP_DELAY + 30)  # give startup check time to finish
+        time.sleep(STARTUP_DELAY + 30)
+        last_analysis = 0
         while True:
             time.sleep(MONITOR_INTERVAL)
+
+            # Controllo salute app
             offline = [n for n, p in PORTS.items() if not _health(p)]
             if offline:
                 newly_offline = set(offline) - self._offline_reported
                 if newly_offline and self.api_key:
                     self._offline_reported.update(newly_offline)
-                    msg = f"⚠️ Rilevato: {', '.join(newly_offline)} non risponde. Verifico."
-                    self.msg_queue.put(("agent", msg))
-                    problem = f"{', '.join(newly_offline)} risulta offline. Controlla i log e dimmi cosa sta succedendo. Il supervisor dovrebbe riavviarle automaticamente — conferma che stia funzionando."
+                    self.msg_queue.put(("agent", f"⚠️ {', '.join(newly_offline)} offline. Verifico..."))
                     threading.Thread(
-                        target=self._agent_thread, args=(problem,), daemon=True
+                        target=self._agent_thread,
+                        args=(f"{', '.join(newly_offline)} è offline. Controlla i log, dimmi cosa succede e se il supervisor sta riavviando.",),
+                        daemon=True,
                     ).start()
             else:
-                # Clear offline set when all back online
                 if self._offline_reported:
                     self._offline_reported.clear()
                     self.msg_queue.put(("agent", "✅ Tutte le app sono tornate online."))
-            # Update status dot
             all_ok = not offline
-            dot = "● tutto ok" if all_ok else f"● {len(offline)} offline"
-            color = "#30d158" if all_ok else "#ff453a"
-            self.msg_queue.put(("status", (dot, color)))
+            self.msg_queue.put(("status", (
+                "● tutto ok" if all_ok else f"● {len(offline)} offline",
+                "#30d158" if all_ok else "#ff453a",
+            )))
+
+            # Analisi autonoma ogni 6 ore
+            if self.api_key and time.time() - last_analysis > ANALYSIS_INTERVAL:
+                last_analysis = time.time()
+                lab_data = tool_read_magic_lab()
+                if "Nessun CSV" not in lab_data and "non trovata" not in lab_data:
+                    analysis_msg = f"""Analisi periodica autonoma. Dati aggiornati da Magic Lab:
+
+{lab_data}
+
+Stato app: {tool_check_status()}
+
+Analizza i risultati delle 6 strategie. Quale sta performando meglio?
+Ci sono miglioramenti da fare? Dammi un report breve con conclusioni concrete."""
+                    self.msg_queue.put(("agent", "🔬 Analisi autonoma in corso..."))
+                    threading.Thread(
+                        target=self._agent_thread,
+                        args=(analysis_msg,),
+                        daemon=True,
+                    ).start()
 
     # ── API key dialog ──────────────────────────────────────────────────────
 
