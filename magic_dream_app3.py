@@ -26,6 +26,7 @@ LAB_GAPS        = MAGIC_LAB_DIR / "latest_event_gaps.csv"
 LAB_RANGE       = MAGIC_LAB_DIR / "latest_range_positions.csv"
 LAB_COMPARISON  = MAGIC_LAB_DIR / "latest_strategy_comparison.csv"
 LAB_DETAIL      = MAGIC_LAB_DIR / "latest_backtest_detail.csv"
+LAB_GOLDEN      = MAGIC_LAB_DIR / "latest_golden_numbers.csv"
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -229,6 +230,29 @@ with tab2:
     st.caption("Ogni strategia seleziona 8 numeri basandosi su metodi diversi.")
 
     next_df = read_csv_safe(str(LAB_NEXT))
+
+    # ── Golden numbers (bootstrap) ────────────────────────────────────────────
+    golden_df = read_csv_safe(str(LAB_GOLDEN))
+    if not golden_df.empty:
+        top4 = golden_df.sort_values("volte_confermato", ascending=False).head(4)
+        top4_nums = list(top4["numero"].astype(int))
+        st.markdown("### 🥇 Golden Numbers — Bootstrap 500 iterazioni")
+        st.markdown(
+            "Numeri che il sistema ha **correttamente predetto nei draw con 4+ hit** "
+            "su 500 campioni di 100 draw ciascuno. "
+            "Frequenza empirica su base storica."
+        )
+        gold_html = "".join(
+            f'<span class="num-ball" style="background:#b45309;border:3px solid #fbbf24;'
+            f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{n:02d}</span>'
+            for n in sorted(top4_nums)
+        )
+        st.markdown(gold_html, unsafe_allow_html=True)
+
+        with st.expander("Top 20 numeri per conferme bootstrap"):
+            top20 = golden_df.head(20)[["rank", "numero", "volte_confermato", "volte_predetto", "tasso_conferma"]]
+            st.dataframe(top20, use_container_width=True, hide_index=True)
+        st.markdown("---")
 
     if next_df.empty:
         st.warning("⏳ Previsioni non ancora disponibili. Attendi che Magic Lab completi il primo ciclo.")

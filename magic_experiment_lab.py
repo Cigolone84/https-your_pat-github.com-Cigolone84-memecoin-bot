@@ -658,6 +658,122 @@ def save_backtest_detail(bt: dict[str, pd.DataFrame], out_dir: Path) -> None:
     write_csv(pivot, out_dir / "latest_strategy_comparison.csv")
 
 
+def bootstrap_golden_numbers(
+    bt: dict[str, pd.DataFrame],
+    draws_df: pd.DataFrame,
+    n_iter: int = 500,
+    sample_size: int = 100,
+    min_hit: int = 4,
+    out_dir: Path = OUT_DIR,
+) -> None:
+    """
+    Bootstrap: trova i numeri che appaiono piu spesso nelle previsioni
+    dei draw dove il sistema ha azzeccato min_hit+ numeri.
+
+    Per ogni iterazione:
+      - Campiona sample_size draw dal backtest storico
+      - Identifica i draw con hit_t0 >= min_hit (qualsiasi strategia)
+      - Per quei draw: interseca candidati con i numeri reali estratti
+      - I numeri che compaiono piu spesso nell'intersezione = golden numbers
+
+    Output: latest_golden_numbers.csv
+    """
+    # Mappa draw_number -> numeri reali estratti
+    actual_by_draw: dict[int, frozenset] = {}
+    for _, row in draws_df.iterrows():
+        draw_num = int(row.get("draw", 0))
+        nums = parse_nums(row.get("Numeri Reali", ""))
+        if len(nums) == 6:
+            actual_by_draw[draw_num] = nums
+
+    if not actual_by_draw:
+        log.warning("bootstrap_golden_numbers: nessun dato 'Numeri Reali' disponibile")
+        return
+
+    # Raccoglie tutti i record backtest in memoria
+    records: list[dict] = []
+    for sname, df_s in bt.items():
+        if df_s.empty:
+            continue
+        for _, row in df_s.iterrows():
+            draw_num = int(row["draw"])
+            if draw_num not in actual_by_draw:
+                continue
+            hit = int(row["hit_t0"]) if pd.notna(row.get("hit_t0")) else 0
+            cands = parse_nums(str(row.get("candidates", "")))
+            records.append({
+                "draw":     draw_num,
+                "strategy": sname,
+                "candidates": cands,
+                "hit_t0":   hit,
+            })
+
+    if not records:
+        log.warning("bootstrap_golden_numbers: nessun record backtest utilizzabile")
+        return
+
+    all_draws = sorted({r["draw"] for r in records})
+    if len(all_draws) < sample_size:
+        log.warning("bootstrap_golden_numbers: solo %d draw disponibili, ne servono %d",
+                    len(all_draws), sample_size)
+        sample_size = len(all_draws)
+
+    rng = np.random.default_rng(42)
+
+    # Contatori globali
+    confirmed_count: Counter = Counter()  # predetto E uscito in draw con 4+ hit
+    predicted_count: Counter = Counter()  # predetto in draw con 4+ hit (qualsiasi esito)
+
+    for _ in range(n_iter):
+        sampled = set(rng.choice(all_draws, size=sample_size, replace=False).tolist())
+
+        # Draw con 4+ hit in questo campione
+        high_hit: set[int] = set()
+        for r in records:
+            if r["draw"] in sampled and r["hit_t0"] >= min_hit:
+                high_hit.add(r["draw"])
+
+        if not high_hit:
+            continue
+
+        # Per i draw high-hit: conta numeri predetti e confermati
+        for r in records:
+            if r["draw"] not in high_hit:
+                continue
+            actual = actual_by_draw[r["draw"]]
+            for n in r["candidates"]:
+                predicted_count[n] += 1
+            for n in r["candidates"] & actual:
+                confirmed_count[n] += 1
+
+    if not confirmed_count:
+        log.warning("bootstrap_golden_numbers: nessun numero confermato (forse troppo pochi draw con %d+ hit)", min_hit)
+        return
+
+    rows_out = []
+    for num in range(1, 50):
+        conf = confirmed_count.get(num, 0)
+        pred = predicted_count.get(num, 0)
+        rate = round(conf / pred, 4) if pred > 0 else 0.0
+        rows_out.append({
+            "numero":           num,
+            "volte_confermato": conf,
+            "volte_predetto":   pred,
+            "tasso_conferma":   rate,
+        })
+
+    df_out = pd.DataFrame(rows_out).sort_values("volte_confermato", ascending=False).reset_index(drop=True)
+    df_out["rank"] = range(1, len(df_out) + 1)
+
+    write_csv(df_out, out_dir / "latest_golden_numbers.csv")
+
+    top4 = df_out.head(4)["numero"].tolist()
+    log.info(
+        "Golden numbers (top 4 su %d iter × %d draw, min_hit=%d): %s",
+        n_iter, sample_size, min_hit, top4,
+    )
+
+
 def run_once(args: argparse.Namespace) -> None:
     log.info("=" * 60)
     log.info("Magic Lab run — %s", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -699,6 +815,9 @@ def run_once(args: argparse.Namespace) -> None:
 
     # Detailed per-draw backtest results (all strategies)
     save_backtest_detail(bt, OUT_DIR)
+
+    # Bootstrap golden numbers (N iterazioni su campioni di 100 draw)
+    bootstrap_golden_numbers(bt, df, n_iter=500, sample_size=100, min_hit=4, out_dir=OUT_DIR)
 
     # Next predictions
     next_preds = generate_next_predictions(df, args.freq_window, args.keep_top, ranking)
