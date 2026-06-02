@@ -79,6 +79,26 @@ n_giuste = sum(1 for r in results if r["n_azzeccati"] >= 4)
 R = n_giuste / total if total else 0
 print(f"Totale previsioni: {total}, GIUSTE (4+): {n_giuste}, frequenza R = {R*100:.3f}%")
 
+# ── COLONNA "mancano_ancora": finestra mobile di 100 a ritroso ──────────────────
+# Per ogni previsione, guardo le 100 che finiscono li (incluse) e calcolo:
+#   attesi = round(R*100), giuste_finestra = quante 4+, mancano = max(0, attesi-giuste)
+WIN = 100
+attesi_100 = max(1, round(R * WIN))   # quante 4+ ci si aspetta in 100 (>=1)
+for i in range(total):
+    lo = max(0, i - WIN + 1)
+    seg = results[lo:i + 1]
+    g = sum(1 for r in seg if r["n_azzeccati"] >= 4)
+    results[i]["giuste_ultime_100"] = g
+    results[i]["attese_100"] = attesi_100
+    results[i]["mancano_ancora"] = max(0, attesi_100 - g)
+    # streak sbagliate fino a qui
+    st = 0
+    for r in reversed(seg):
+        if r["n_azzeccati"] < 4: st += 1
+        else: break
+    results[i]["streak_sbagliate"] = st
+print(f"Attesi per 100 = {attesi_100}")
+
 # ── PASSO 2: le 73 ripetizioni ──────────────────────────────────────────────────
 WIN = 100
 N_FIN = total // WIN
@@ -174,9 +194,20 @@ df_u = pd.concat([df_u, pd.DataFrame([{
     "n_azzeccati":"?","esito_4plus":"CANDIDATA PER ESCLUSIONE",
 }])], ignore_index=True)
 
+# ── FOGLIO TUTTE LE PREVISIONI (il database completo) ──────────────────────────
+df_tutte = pd.DataFrame(results)
+df_tutte.insert(0, "n_previsione", range(1, len(df_tutte) + 1))
+# ordina colonne in modo leggibile
+cols = ["n_previsione","draw","previsione_8","strategia_migliore","numeri_usciti",
+        "numeri_azzeccati","n_azzeccati","esito_4plus",
+        "giuste_ultime_100","attese_100","mancano_ancora","streak_sbagliate"]
+df_tutte = df_tutte[[c for c in cols if c in df_tutte.columns]]
+
 out = Path("/home/user/https-your_pat-github.com-Cigolone84-memecoin-bot/IL_CONCETTO.xlsx")
 with pd.ExcelWriter(str(out), engine="openpyxl") as w:
     df_concetto.to_excel(w, sheet_name="IL_CONCETTO", index=False)
+    df_tutte.to_excel(w, sheet_name="Tutte_Previsioni", index=False)
     df_73.to_excel(w, sheet_name="73_Ripetizioni", index=False)
     df_u.to_excel(w, sheet_name="Ultime_100", index=False)
 print(f"\nFile: {out} ({out.stat().st_size//1024} KB)")
+print(f"Foglio Tutte_Previsioni: {len(df_tutte)} righe (tutte le previsioni)")
