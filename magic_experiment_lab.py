@@ -1965,6 +1965,88 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
                  vuoto_massimo, finestra_certezza, n_win_con_hit, n_win_tot,
                  pct_win_con_hit, n73_con, n73_tot)
 
+        # ── FOGLIO Cento_Previsioni — IL CUORE DEL CONCETTO ───────────────────
+        # Le ultime 100 estrazioni che finiscono a STASERA. Per ognuna mostro la
+        # previsione fatta (walk-forward) e se era 4+ (giusta) o sbagliata.
+        # Conto le sbagliate. L'ultima riga = STASERA = quella che manca all'appello.
+        ultime100 = all_draws[-100:] if len(all_draws) >= 100 else all_draws[:]
+        per_best  = shift_results.get(best_shift_recent, {})
+
+        cento_rows = []
+        n_giuste_100  = 0
+        n_sbagliate_100 = 0
+        streak_finale_miss = 0   # miss consecutivi a fine sequenza
+        running_streak = 0
+        for pos, d in enumerate(ultime100, 1):
+            per = per_best.get(d, {})
+            strat_hits = {s: per.get(f"hit_{s}", 0) for s in STRATEGY_NAMES if f"hit_{s}" in per}
+            max_hit = max(strat_hits.values(), default=0)
+            best_s  = max(strat_hits, key=strat_hits.get) if strat_hits else ""
+            cands   = parse_nums(per.get(f"cands_{best_s}", "")) if best_s else frozenset()
+            actual  = actual_by_draw.get(d, frozenset())
+            azzeccati = sorted(cands & actual)
+            esito = "GIUSTA (4+)" if max_hit >= MIN_HIT else "sbagliata"
+            if max_hit >= MIN_HIT:
+                n_giuste_100 += 1
+                running_streak = 0
+            else:
+                n_sbagliate_100 += 1
+                running_streak += 1
+            streak_finale_miss = running_streak
+            cento_rows.append({
+                "n_previsione":   pos,
+                "draw":           d,
+                "previsione_8":   " ".join(f"{x:02d}" for x in sorted(cands)),
+                "strategia":      best_s,
+                "numeri_usciti":  " ".join(f"{x:02d}" for x in sorted(actual)),
+                "azzeccati":      max_hit,
+                "centrati":       " ".join(f"{x:02d}" for x in azzeccati),
+                "esito":          esito,
+            })
+
+        # Riga STASERA = la 100ma+1, quella che manca all'appello (numeri previsti)
+        cento_rows.append({
+            "n_previsione":   "STASERA",
+            "draw":           "?",
+            "previsione_8":   " ".join(f"{n:02d}" for n in sorted(top6_boot)),
+            "strategia":      "BOOTSTRAP (consenso 72 previsioni)",
+            "numeri_usciti":  "DA ESTRARRE",
+            "azzeccati":      "?",
+            "centrati":       "← L'ULTIMA CHE MANCA ALL'APPELLO",
+            "esito":          "FORZATA PER ESCLUSIONE" if streak_finale_miss >= 1 else "in attesa",
+        })
+        df_cento = pd.DataFrame(cento_rows)
+
+        # Riepilogo del concetto
+        cento_summary = [
+            {"voce": "ULTIME 100 PREVISIONI fino a stasera (la tua regola)",
+             "valore": "Ogni riga = una previsione walk-forward su un draw reale gia' noto"},
+            {"voce": "---", "valore": ""},
+            {"voce": "Previsioni analizzate",        "valore": len(ultime100)},
+            {"voce": "Previsioni GIUSTE (4+)",       "valore": n_giuste_100},
+            {"voce": "Previsioni sbagliate",         "valore": n_sbagliate_100},
+            {"voce": "Frequenza attesa (storica)",   "valore": f"{R*100:.2f}% = ~{R*100:.1f} su 100"},
+            {"voce": "---", "valore": ""},
+            {"voce": "Sbagliate consecutive a fine sequenza (streak)",
+             "valore": streak_finale_miss},
+            {"voce": "STASERA — numeri (consenso 72 previsioni)",
+             "valore": " ".join(f"{n:02d}" for n in sorted(top6_boot))},
+            {"voce": "STASERA — top 4",
+             "valore": " ".join(f"{n:02d}" for n in sorted(top4_boot))},
+            {"voce": "---", "valore": ""},
+            {"voce": "LETTURA PER ESCLUSIONE",
+             "valore": (
+                 f"Nelle ultime 100 previsioni ne sono uscite {n_giuste_100} giuste "
+                 f"(attese ~{R*100:.0f}). Le ultime {streak_finale_miss} sono sbagliate "
+                 f"di fila. Stasera e' la previsione che chiude la finestra: "
+                 f"numeri {' '.join(f'{n:02d}' for n in sorted(top6_boot))}."
+             )},
+        ]
+        df_cento_summary = pd.DataFrame(cento_summary)
+
+        log.info("Cento_Previsioni: %d giuste, %d sbagliate, streak finale=%d, stasera=%s",
+                 n_giuste_100, n_sbagliate_100, streak_finale_miss, sorted(top6_boot))
+
         # Aggiungi riga CICLO_SCADENZA al foglio Stasera
         stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0, "shift_usato": "", "motivo_shift": ""})
         stasera_rows.append({
@@ -1984,6 +2066,8 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         df_esclusione_cumul = pd.DataFrame()
         df_regola           = pd.DataFrame([{"voce": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
         df_fin73            = pd.DataFrame()
+        df_cento            = pd.DataFrame()
+        df_cento_summary    = pd.DataFrame([{"voce": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
         log.warning("Ciclo_Scadenza: nessun evento 4+ hit trovato con shift=%d", best_shift_recent)
 
     # ────────────────── Scrivi Excel ──────────────────────────────────────────
@@ -1991,6 +2075,9 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
             # ── FOGLI PRINCIPALI (primi da vedere) ────────────────────────────
+            df_cento_summary.to_excel(writer,  sheet_name="Cento_Previsioni",   index=False)
+            if not df_cento.empty:
+                df_cento.to_excel(writer,      sheet_name="Cento_Dettaglio",    index=False)
             df_regola.to_excel(writer,         sheet_name="Regola_Esclusione",  index=False)
             if not df_fin73.empty:
                 df_fin73.to_excel(writer,      sheet_name="Finestre_73",         index=False)
