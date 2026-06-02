@@ -204,10 +204,60 @@ cols = ["n_previsione","draw","previsione_8","strategia_migliore","numeri_usciti
 df_tutte = df_tutte[[c for c in cols if c in df_tutte.columns]]
 
 out = Path("/home/user/https-your_pat-github.com-Cigolone84-memecoin-bot/IL_CONCETTO.xlsx")
+
+# ── FOGLIO Solo_Le_Giuste: solo il 2% vincente ──────────────────────────────────
+df_giuste = df_tutte[df_tutte["esito_4plus"] == "GIUSTA (4+)"].copy().reset_index(drop=True)
+df_giuste.insert(0, "hit_numero", range(1, len(df_giuste)+1))
+
+# numeri piu comuni nelle previsioni GIUSTE (cosa prevedeva la strategia quando vinciamo)
+voti_in_previsioni_giuste = Counter()
+voti_numeri_azzeccati     = Counter()
+for _, r in df_giuste.iterrows():
+    for n in str(r.get("previsione_8","")).split():
+        if n.isdigit(): voti_in_previsioni_giuste[int(n)] += 1
+    for n in str(r.get("numeri_azzeccati","")).split():
+        if n.isdigit(): voti_numeri_azzeccati[int(n)] += 1
+
+n_g = len(df_giuste)
+
+# riepilogo
+riepilogo = pd.DataFrame([
+    {"VOCE": f"QUESTE SONO LE {n_g} PREVISIONI NEL 2% (tutte le 4+ azzeccate)",
+     "VALORE": f"su {total} previsioni totali = {R*100:.2f}%"},
+    {"VOCE": "---", "VALORE": ""},
+    {"VOCE": "NUMERI PIU COMUNI nelle 8 previsioni delle vincenti (top 10)",
+     "VALORE": " | ".join(f"{n:02d}({c}x)" for n,c in voti_in_previsioni_giuste.most_common(10))},
+    {"VOCE": "NUMERI PIU AZZECCATI in assoluto nelle vincenti (top 10)",
+     "VALORE": " | ".join(f"{n:02d}({c}x)" for n,c in voti_numeri_azzeccati.most_common(10))},
+    {"VOCE": "---", "VALORE": ""},
+    {"VOCE": "TOP 6 NUMERI DA GIOCARE STASERA (dai numeri piu azzeccati storicamente)",
+     "VALORE": " ".join(f"{n:02d}" for n,_ in voti_numeri_azzeccati.most_common(6))},
+    {"VOCE": "TOP 4",
+     "VALORE": " ".join(f"{n:02d}" for n,_ in voti_numeri_azzeccati.most_common(4))},
+    {"VOCE": "---", "VALORE": ""},
+    {"VOCE": "streak medio prima di una GIUSTA (quante sbagliate di fila precedono il 2%)",
+     "VALORE": round(df_giuste["streak_sbagliate"].mean(), 1) if "streak_sbagliate" in df_giuste.columns else "n/d"},
+    {"VOCE": "streak ATTUALE (sbagliate consecutive ora)",
+     "VALORE": results[-1]["streak_sbagliate"]},
+    {"VOCE": "CONCLUSIONE",
+     "VALORE": (
+         f"Le {n_g} volte storiche in cui siamo stati nel 2%, "
+         f"i numeri piu' spesso coinvolti nelle azzeccate erano: "
+         f"{' '.join(f'{n:02d}' for n,_ in voti_numeri_azzeccati.most_common(6))}. "
+         f"Lo streak attuale e' {results[-1]['streak_sbagliate']} sbagliate consecutive."
+     )},
+])
+
 with pd.ExcelWriter(str(out), engine="openpyxl") as w:
-    df_concetto.to_excel(w, sheet_name="IL_CONCETTO", index=False)
-    df_tutte.to_excel(w, sheet_name="Tutte_Previsioni", index=False)
-    df_73.to_excel(w, sheet_name="73_Ripetizioni", index=False)
-    df_u.to_excel(w, sheet_name="Ultime_100", index=False)
+    df_concetto.to_excel(w,  sheet_name="IL_CONCETTO",     index=False)
+    riepilogo.to_excel(w,    sheet_name="Solo_Le_Giuste",  index=False)
+    df_giuste.to_excel(w,    sheet_name="148_Vincenti",    index=False)
+    df_tutte.to_excel(w,     sheet_name="Tutte_Previsioni",index=False)
+    df_73.to_excel(w,        sheet_name="73_Ripetizioni",  index=False)
+    df_u.to_excel(w,         sheet_name="Ultime_100",      index=False)
+
 print(f"\nFile: {out} ({out.stat().st_size//1024} KB)")
-print(f"Foglio Tutte_Previsioni: {len(df_tutte)} righe (tutte le previsioni)")
+print(f"Foglio 148_Vincenti: {len(df_giuste)} righe")
+print("Top 6 numeri piu azzeccati nelle 148 vincenti:",
+      [n for n,_ in voti_numeri_azzeccati.most_common(6)])
+print("Streak attuale:", results[-1]["streak_sbagliate"])
