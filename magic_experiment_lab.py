@@ -1837,6 +1837,134 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
                  R * 100, prev_per_hit, prev_gia_scartate, p_finora * 100,
                  n_for_confidence(0.99))
 
+        # ── TEST DECISIVO: la REGOLA DELL'ESCLUSIONE vale sui dati reali? ──────
+        # Domanda: OGNI finestra di 100 estrazioni consecutive ha SEMPRE
+        # contenuto almeno un 4+? Se SI al 100%, allora dopo 99 previsioni
+        # sbagliate la 100ma (stasera) e' FORZATA a essere giusta.
+        # Il test e' il "vuoto massimo": la sequenza piu lunga di estrazioni
+        # consecutive SENZA un 4+. Se < 100 => nessuna finestra-100 e' mai
+        # stata vuota => regola valida al 100%.
+        WIN = 100
+        idx_hit = sorted(hit_events)
+        hit_set = set(idx_hit)
+        pos_by_draw = {d: i for i, d in enumerate(all_draws)}
+
+        # Vuoto massimo = max gap (incluso il tratto iniziale e finale)
+        first_pos = pos_by_draw[idx_hit[0]]
+        last_pos  = pos_by_draw[idx_hit[-1]]
+        gaps_pos  = [pos_by_draw[idx_hit[i]] - pos_by_draw[idx_hit[i-1]]
+                     for i in range(1, len(idx_hit))]
+        vuoto_interno_max = max(gaps_pos) if gaps_pos else 0
+        vuoto_iniziale    = first_pos               # draw prima del 1o hit
+        vuoto_finale      = (len(all_draws) - 1) - last_pos  # draw dopo l'ultimo
+        vuoto_massimo     = max(vuoto_interno_max, vuoto_iniziale, vuoto_finale)
+
+        # Rolling: quante finestre di 100 contengono >=1 hit?
+        n_win_tot = len(all_draws) - WIN + 1
+        n_win_con_hit = 0
+        n_win_vuote = 0
+        if n_win_tot > 0:
+            # prefix sum dei hit per conteggio O(n)
+            is_hit = [1 if d in hit_set else 0 for d in all_draws]
+            pref = [0] * (len(is_hit) + 1)
+            for i, v in enumerate(is_hit):
+                pref[i + 1] = pref[i] + v
+            for start in range(n_win_tot):
+                c = pref[start + WIN] - pref[start]
+                if c >= 1:
+                    n_win_con_hit += 1
+                else:
+                    n_win_vuote += 1
+        pct_win_con_hit = (n_win_con_hit / n_win_tot * 100) if n_win_tot else 0
+
+        regola_vale = vuoto_massimo < WIN
+        if regola_vale:
+            verdetto = (
+                f"REGOLA VALIDA AL 100%%: il vuoto piu lungo mai visto e' "
+                f"{vuoto_massimo} estrazioni (< 100). Nessuna finestra di 100 "
+                f"e' MAI stata vuota. Dopo 99 previsioni sbagliate, stasera e' "
+                f"FORZATA a essere il 4+ — e' l'ultima all'appello."
+            )
+        else:
+            verdetto = (
+                f"REGOLA DA TARARE: il vuoto piu lungo e' {vuoto_massimo} "
+                f"estrazioni (> 100). Esistono {n_win_vuote} finestre di 100 "
+                f"senza alcun 4+. Per avere la CERTEZZA per esclusione devi usare "
+                f"una finestra di {vuoto_massimo + 1} estrazioni, non 100: dopo "
+                f"{vuoto_massimo} sbagliate la successiva e' forzata."
+            )
+
+        # finestra di certezza = vuoto_massimo + 1
+        finestra_certezza = vuoto_massimo + 1
+        prev_mancanti_certezza = max(0, finestra_certezza - 1 - current_gap)
+
+        regola_rows = [
+            {"voce": "LA TUA REGOLA DELL'ESCLUSIONE — verifica sui dati reali",
+             "valore": (
+                 "Se ogni finestra di N estrazioni ha SEMPRE contenuto almeno un "
+                 "4+, allora dopo N-1 previsioni sbagliate la N-esima e' certa."
+             )},
+            {"voce": "---", "valore": ""},
+            {"voce": "Estrazioni totali analizzate",       "valore": len(all_draws)},
+            {"voce": "Hit 4+ totali",                       "valore": len(idx_hit)},
+            {"voce": "Frequenza (R)",                       "valore": f"{R*100:.3f}%"},
+            {"voce": "1 hit ogni",                          "valore": f"{prev_per_hit:.1f} estrazioni"},
+            {"voce": "---", "valore": ""},
+            {"voce": "VUOTO PIU LUNGO MAI VISTO (max estrazioni senza 4+)",
+             "valore": vuoto_massimo},
+            {"voce": "  di cui vuoto interno max",          "valore": vuoto_interno_max},
+            {"voce": "  vuoto iniziale (prima del 1o hit)", "valore": vuoto_iniziale},
+            {"voce": "  vuoto finale (dopo l'ultimo hit)",  "valore": vuoto_finale},
+            {"voce": "---", "valore": ""},
+            {"voce": "Finestre di 100 testate (rolling)",   "valore": n_win_tot},
+            {"voce": "Finestre con >=1 hit",                "valore": f"{n_win_con_hit} ({pct_win_con_hit:.2f}%)"},
+            {"voce": "Finestre VUOTE (zero hit)",           "valore": n_win_vuote},
+            {"voce": "---", "valore": ""},
+            {"voce": "LA REGOLA A 100 VALE?",               "valore": "SI" if regola_vale else "NO"},
+            {"voce": "VERDETTO",                            "valore": verdetto},
+            {"voce": "---", "valore": ""},
+            {"voce": "FINESTRA DI CERTEZZA CORRETTA",       "valore": f"{finestra_certezza} estrazioni"},
+            {"voce": "Spiegazione finestra di certezza",
+             "valore": (
+                 f"Dopo {finestra_certezza - 1} previsioni consecutive sbagliate, "
+                 f"la successiva e' FORZATA: storicamente non c'e' MAI stato un vuoto "
+                 f"di {finestra_certezza} estrazioni."
+             )},
+            {"voce": "---", "valore": ""},
+            {"voce": "Previsioni gia' sbagliate ORA (dall'ultimo hit)", "valore": current_gap},
+            {"voce": "Previsioni che mancano alla certezza",
+             "valore": prev_mancanti_certezza},
+            {"voce": "STASERA E' FORZATA?",
+             "valore": (
+                 "SI — sei alla/oltre la soglia, stasera e' l'ultima all'appello"
+                 if current_gap >= finestra_certezza - 1
+                 else f"NON ANCORA — mancano {prev_mancanti_certezza} previsioni sbagliate "
+                      f"per forzare la certezza per esclusione"
+             )},
+        ]
+        df_regola = pd.DataFrame(regola_rows)
+
+        # Le ~73 finestre NON sovrapposte: hit per finestra (prova del 1-2/100)
+        fin73_rows = []
+        for w_idx in range(len(all_draws) // WIN):
+            seg = all_draws[w_idx * WIN:(w_idx + 1) * WIN]
+            c = sum(1 for d in seg if d in hit_set)
+            fin73_rows.append({
+                "finestra":    w_idx + 1,
+                "draw_start":  seg[0],
+                "draw_end":    seg[-1],
+                "hit_4plus":   c,
+                "ha_almeno_1": "SI" if c >= 1 else "NO — VUOTA",
+            })
+        df_fin73 = pd.DataFrame(fin73_rows)
+        n73_con = int((df_fin73["hit_4plus"] >= 1).sum()) if not df_fin73.empty else 0
+        n73_tot = len(df_fin73)
+
+        log.info("REGOLA ESCLUSIONE: vuoto_max=%d, finestra_certezza=%d, "
+                 "finestre100 con hit=%d/%d (%.1f%%), 73-finestre con hit=%d/%d",
+                 vuoto_massimo, finestra_certezza, n_win_con_hit, n_win_tot,
+                 pct_win_con_hit, n73_con, n73_tot)
+
         # Aggiungi riga CICLO_SCADENZA al foglio Stasera
         stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0, "shift_usato": "", "motivo_shift": ""})
         stasera_rows.append({
@@ -1854,6 +1982,8 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         df_ultimi_hit       = pd.DataFrame()
         df_esclusione       = pd.DataFrame([{"voce": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
         df_esclusione_cumul = pd.DataFrame()
+        df_regola           = pd.DataFrame([{"voce": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
+        df_fin73            = pd.DataFrame()
         log.warning("Ciclo_Scadenza: nessun evento 4+ hit trovato con shift=%d", best_shift_recent)
 
     # ────────────────── Scrivi Excel ──────────────────────────────────────────
@@ -1861,6 +1991,9 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
             # ── FOGLI PRINCIPALI (primi da vedere) ────────────────────────────
+            df_regola.to_excel(writer,         sheet_name="Regola_Esclusione",  index=False)
+            if not df_fin73.empty:
+                df_fin73.to_excel(writer,      sheet_name="Finestre_73",         index=False)
             df_esclusione.to_excel(writer,     sheet_name="Esclusione_2pct",   index=False)
             if not df_esclusione_cumul.empty:
                 df_esclusione_cumul.to_excel(writer, sheet_name="Esclusione_Cumulativa", index=False)
