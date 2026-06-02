@@ -232,74 +232,157 @@ with tab2:
 
     next_df = read_csv_safe(str(LAB_NEXT))
 
-    # ── Golden 6 da analisi sistematica Excel ────────────────────────────────
+    # ── Deep Analysis Excel (golden_analysis.xlsx) ───────────────────────────
     if LAB_EXCEL.exists():
         try:
-            g6_df = pd.read_excel(str(LAB_EXCEL), sheet_name="Golden6")
-            fin_df = pd.read_excel(str(LAB_EXCEL), sheet_name="Finestre")
-            rank_df_xl = pd.read_excel(str(LAB_EXCEL), sheet_name="Numeri_Ranking")
+            xl = pd.ExcelFile(str(LAB_EXCEL))
+            sheets = xl.sheet_names
 
-            st.markdown("### 🎯 GOLDEN 6 — Analisi sistematica su tutte le estrazioni storiche")
-            n_finestre = len(fin_df) if not fin_df.empty else "?"
-            st.markdown(
-                f"Risultato di **{n_finestre} finestre da 100 draw** su tutta la storia. "
-                "Top 4 = numeri che compaiono più spesso nei draw con 4+ hit. "
-                "Coppia residua = i 2 numeri che co-appaiono più spesso con il top 4."
-            )
+            # ── STASERA ──────────────────────────────────────────────────────
+            if "Stasera" in sheets and "Stasera_Consenso" in sheets:
+                df_stasera  = xl.parse("Stasera")
+                df_consenso = xl.parse("Stasera_Consenso")
 
-            core = g6_df[g6_df["ruolo"].str.contains("CORE", na=False)]["numero"].tolist()
-            coppia = g6_df[g6_df["ruolo"].str.contains("COPPIA", na=False)]["numero"].tolist()
-            tutti = sorted([int(n) for n in core + coppia])
+                st.markdown("## 🌙 PREVISIONE STASERA — Deep Analysis")
+                st.markdown("Calcolata con lo shift ottimale validato sugli ultimi 100 draw reali.")
 
-            col_core, col_cop = st.columns([3, 2])
-            with col_core:
-                st.markdown("**Top 4 (nucleo):**")
-                html4 = "".join(
-                    f'<span class="num-ball" style="background:#b45309;border:3px solid #fbbf24;'
-                    f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{int(n):02d}</span>'
-                    for n in sorted([int(x) for x in core])
+                # Golden 4 e Golden 6 stasera
+                golden4_row = df_stasera[df_stasera["strategia"] == "GOLDEN4_STASERA"]
+                golden6_row = df_stasera[df_stasera["strategia"] == "GOLDEN6_STASERA"]
+                golden6_stor = df_stasera[df_stasera["strategia"] == "GOLDEN6_STORICO"]
+
+                if not golden4_row.empty:
+                    shift_usato = golden4_row.iloc[0].get("shift_usato", "?")
+                    st.caption(f"Shift ottimale recente: **{shift_usato} draw**")
+
+                    cA, cB = st.columns(2)
+                    with cA:
+                        st.markdown("### 🥇 GOLDEN 4 — Stasera")
+                        nums4 = str(golden4_row.iloc[0].get("numeri", ""))
+                        st.markdown(
+                            "".join(
+                                f'<span class="num-ball" style="background:#b45309;'
+                                f'border:3px solid #fbbf24;font-size:1.1rem;'
+                                f'width:52px;height:52px;line-height:52px;">{n}</span>'
+                                for n in nums4.split() if n.isdigit()
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with cB:
+                        st.markdown("### 🎯 GOLDEN 6 — Stasera")
+                        nums6 = str(golden6_row.iloc[0].get("numeri", "")) if not golden6_row.empty else ""
+                        st.markdown(
+                            "".join(
+                                f'<span class="num-ball" style="background:#166534;'
+                                f'border:3px solid #4ade80;font-size:1.1rem;'
+                                f'width:52px;height:52px;line-height:52px;">{n}</span>'
+                                for n in nums6.split() if n.isdigit()
+                            ),
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown("---")
+
+                # Consenso stasera
+                if not df_consenso.empty:
+                    st.markdown("### 📊 Consenso strategie — stasera")
+                    st.caption("Quante delle 8 strategie prevedono ogni numero")
+                    st.dataframe(df_consenso.head(15), use_container_width=True, hide_index=True)
+                st.markdown("---")
+
+            # ── RITORNO AL FUTURO ─────────────────────────────────────────────
+            if "RitornoAlFuturo" in sheets:
+                df_raf = xl.parse("RitornoAlFuturo")
+                st.markdown("### ⏱️ Ritorno al Futuro — shift ottimale recente")
+                st.caption(
+                    "Per ogni shift: prestazioni sugli ultimi 100 draw reali (noti). "
+                    "Lo shift con ⭐ è quello da usare per stasera."
                 )
-                st.markdown(html4, unsafe_allow_html=True)
-            with col_cop:
-                st.markdown("**Coppia residua (per il 6):**")
-                html2 = "".join(
-                    f'<span class="num-ball" style="background:#1d4ed8;border:3px solid #60a5fa;'
-                    f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{int(n):02d}</span>'
-                    for n in sorted([int(x) for x in coppia])
+                raf_cols = [c for c in ["shift_draw", "hit_medio", "draw_4+", "pct_4+",
+                                         "draw_5+", "migliore_per_stasera", "spiegazione"]
+                            if c in df_raf.columns]
+                st.dataframe(df_raf[raf_cols].head(9), use_container_width=True, hide_index=True)
+                st.markdown("---")
+
+            # ── GOLDEN 6 STORICO ──────────────────────────────────────────────
+            if "Golden6" in sheets:
+                g6_df = xl.parse("Golden6")
+                n_finestre = len(xl.parse("Finestre_100")) if "Finestre_100" in sheets else "?"
+                st.markdown("### 🏛️ GOLDEN 6 Storico — convergenza su 57 anni")
+                st.caption(
+                    f"{n_finestre} finestre da 100 draw × 9 shift = "
+                    "numeri che sopravvivono a TUTTA la storia."
                 )
-                st.markdown(html2, unsafe_allow_html=True)
 
-            st.markdown(f"**GOLDEN 6 completo:** " + " — ".join(f"`{n:02d}`" for n in tutti))
+                core   = g6_df[g6_df["ruolo"].str.contains("CORE",   na=False)]["numero"].tolist()
+                coppia = g6_df[g6_df["ruolo"].str.contains("COPPIA", na=False)]["numero"].tolist()
+                tutti  = sorted([int(n) for n in core + coppia])
 
-            with st.expander(f"Finestre ({n_finestre} × 100 draw) — convergenza"):
-                st.dataframe(fin_df, use_container_width=True, hide_index=True, height=300)
-            with st.expander("Ranking tutti i 49 numeri per finestre in top-4"):
-                st.dataframe(rank_df_xl.head(20), use_container_width=True, hide_index=True)
-            st.markdown("---")
-        except Exception as _e:
-            pass
+                cC, cD = st.columns([3, 2])
+                with cC:
+                    st.markdown("**Top 4 nucleo (57 anni):**")
+                    st.markdown(
+                        "".join(
+                            f'<span class="num-ball" style="background:#b45309;'
+                            f'border:3px solid #fbbf24;width:48px;height:48px;line-height:48px;">'
+                            f'{int(n):02d}</span>'
+                            for n in sorted([int(x) for x in core])
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                with cD:
+                    st.markdown("**Coppia residua:**")
+                    st.markdown(
+                        "".join(
+                            f'<span class="num-ball" style="background:#1d4ed8;'
+                            f'border:3px solid #60a5fa;width:48px;height:48px;line-height:48px;">'
+                            f'{int(n):02d}</span>'
+                            for n in sorted([int(x) for x in coppia])
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                st.markdown("**Golden 6 storico:** " + "  ".join(f"`{n:02d}`" for n in tutti))
+
+                with st.expander("Dettaglio Golden6 con spiegazioni"):
+                    st.dataframe(g6_df, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+
+            # ── NUMERI RANKING ────────────────────────────────────────────────
+            if "Numeri_Ranking" in sheets:
+                nr_df = xl.parse("Numeri_Ranking")
+                with st.expander("🔢 Ranking 49 numeri — volte confermati su tutta la storia"):
+                    st.dataframe(nr_df.head(20), use_container_width=True, hide_index=True)
+                st.markdown("---")
+
+            # ── FINESTRE 100 ──────────────────────────────────────────────────
+            if "Finestre_100" in sheets:
+                fin_df = xl.parse("Finestre_100")
+                with st.expander(f"📋 Tutte le finestre da 100 draw ({len(fin_df)} finestre)"):
+                    st.dataframe(fin_df, use_container_width=True, hide_index=True, height=350)
+
+        except Exception as _err:
+            st.warning(f"Errore lettura golden_analysis.xlsx: {_err}")
 
     # ── Golden numbers (bootstrap) ────────────────────────────────────────────
     golden_df = read_csv_safe(str(LAB_GOLDEN))
     if not golden_df.empty:
+        st.markdown("### 🥇 Golden Numbers — Bootstrap 500 iterazioni")
         top4 = golden_df.sort_values("volte_confermato", ascending=False).head(4)
         top4_nums = list(top4["numero"].astype(int))
-        st.markdown("### 🥇 Golden Numbers — Bootstrap 500 iterazioni")
         st.markdown(
-            "Numeri che il sistema ha **correttamente predetto nei draw con 4+ hit** "
-            "su 500 campioni di 100 draw ciascuno. "
-            "Frequenza empirica su base storica."
+            "".join(
+                f'<span class="num-ball" style="background:#b45309;border:3px solid #fbbf24;'
+                f'width:48px;height:48px;line-height:48px;">{n:02d}</span>'
+                for n in sorted(top4_nums)
+            ),
+            unsafe_allow_html=True,
         )
-        gold_html = "".join(
-            f'<span class="num-ball" style="background:#b45309;border:3px solid #fbbf24;'
-            f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{n:02d}</span>'
-            for n in sorted(top4_nums)
-        )
-        st.markdown(gold_html, unsafe_allow_html=True)
-
-        with st.expander("Top 20 numeri per conferme bootstrap"):
-            top20 = golden_df.head(20)[["rank", "numero", "volte_confermato", "volte_predetto", "tasso_conferma"]]
-            st.dataframe(top20, use_container_width=True, hide_index=True)
+        with st.expander("Top 20 per conferme bootstrap"):
+            st.dataframe(
+                golden_df.head(20)[["rank", "numero", "volte_confermato", "volte_predetto", "tasso_conferma"]],
+                use_container_width=True, hide_index=True,
+            )
         st.markdown("---")
 
     if next_df.empty:
