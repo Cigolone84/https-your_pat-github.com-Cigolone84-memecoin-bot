@@ -27,6 +27,7 @@ LAB_RANGE       = MAGIC_LAB_DIR / "latest_range_positions.csv"
 LAB_COMPARISON  = MAGIC_LAB_DIR / "latest_strategy_comparison.csv"
 LAB_DETAIL      = MAGIC_LAB_DIR / "latest_backtest_detail.csv"
 LAB_GOLDEN      = MAGIC_LAB_DIR / "latest_golden_numbers.csv"
+LAB_EXCEL       = MAGIC_LAB_DIR / "golden_analysis.xlsx"
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -230,6 +231,53 @@ with tab2:
     st.caption("Ogni strategia seleziona 8 numeri basandosi su metodi diversi.")
 
     next_df = read_csv_safe(str(LAB_NEXT))
+
+    # ── Golden 6 da analisi sistematica Excel ────────────────────────────────
+    if LAB_EXCEL.exists():
+        try:
+            g6_df = pd.read_excel(str(LAB_EXCEL), sheet_name="Golden6")
+            fin_df = pd.read_excel(str(LAB_EXCEL), sheet_name="Finestre")
+            rank_df_xl = pd.read_excel(str(LAB_EXCEL), sheet_name="Numeri_Ranking")
+
+            st.markdown("### 🎯 GOLDEN 6 — Analisi sistematica su tutte le estrazioni storiche")
+            n_finestre = len(fin_df) if not fin_df.empty else "?"
+            st.markdown(
+                f"Risultato di **{n_finestre} finestre da 100 draw** su tutta la storia. "
+                "Top 4 = numeri che compaiono più spesso nei draw con 4+ hit. "
+                "Coppia residua = i 2 numeri che co-appaiono più spesso con il top 4."
+            )
+
+            core = g6_df[g6_df["ruolo"].str.contains("CORE", na=False)]["numero"].tolist()
+            coppia = g6_df[g6_df["ruolo"].str.contains("COPPIA", na=False)]["numero"].tolist()
+            tutti = sorted([int(n) for n in core + coppia])
+
+            col_core, col_cop = st.columns([3, 2])
+            with col_core:
+                st.markdown("**Top 4 (nucleo):**")
+                html4 = "".join(
+                    f'<span class="num-ball" style="background:#b45309;border:3px solid #fbbf24;'
+                    f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{int(n):02d}</span>'
+                    for n in sorted([int(x) for x in core])
+                )
+                st.markdown(html4, unsafe_allow_html=True)
+            with col_cop:
+                st.markdown("**Coppia residua (per il 6):**")
+                html2 = "".join(
+                    f'<span class="num-ball" style="background:#1d4ed8;border:3px solid #60a5fa;'
+                    f'font-size:1.1rem;width:48px;height:48px;line-height:48px;">{int(n):02d}</span>'
+                    for n in sorted([int(x) for x in coppia])
+                )
+                st.markdown(html2, unsafe_allow_html=True)
+
+            st.markdown(f"**GOLDEN 6 completo:** " + " — ".join(f"`{n:02d}`" for n in tutti))
+
+            with st.expander(f"Finestre ({n_finestre} × 100 draw) — convergenza"):
+                st.dataframe(fin_df, use_container_width=True, hide_index=True, height=300)
+            with st.expander("Ranking tutti i 49 numeri per finestre in top-4"):
+                st.dataframe(rank_df_xl.head(20), use_container_width=True, hide_index=True)
+            st.markdown("---")
+        except Exception as _e:
+            pass
 
     # ── Golden numbers (bootstrap) ────────────────────────────────────────────
     golden_df = read_csv_safe(str(LAB_GOLDEN))

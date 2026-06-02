@@ -774,6 +774,195 @@ def bootstrap_golden_numbers(
     )
 
 
+def save_systematic_windows_excel(
+    bt: dict[str, pd.DataFrame],
+    draws_df: pd.DataFrame,
+    window_size: int = 100,
+    min_hit: int = 4,
+    out_dir: Path = OUT_DIR,
+) -> None:
+    """
+    Divide tutti i draw in finestre consecutive di window_size draw.
+    Per ogni finestra: trova draw con 4+ hit, interseca candidati con numeri reali,
+    conta quali numeri sono stati correttamente predetti piu spesso.
+
+    Output Excel (golden_analysis.xlsx):
+      Foglio "Finestre"      : una riga per finestra — draw range, hit count, top numeri
+      Foglio "Numeri_Ranking": ogni numero 1-49 ranked per frequenza nelle finestre
+      Foglio "Coppie"        : coppie di numeri che co-appaiono piu spesso nei top-4 per finestra
+      Foglio "Golden6"       : raccomandazione finale: top 4 + coppia residua = 6 numeri
+    """
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        log.warning("openpyxl non installato — salto Excel. Installa con: pip install openpyxl")
+        return
+
+    # ── Lookup: draw_num -> numeri reali ─────────────────────────────────────
+    actual_by_draw: dict[int, frozenset] = {}
+    for _, row in draws_df.iterrows():
+        d = int(row.get("draw", 0))
+        nums = parse_nums(row.get("Numeri Reali", ""))
+        if len(nums) == 6:
+            actual_by_draw[d] = nums
+
+    if not actual_by_draw:
+        log.warning("save_systematic_windows_excel: nessun dato 'Numeri Reali'")
+        return
+
+    # ── Record dal backtest ──────────────────────────────────────────────────
+    records: list[dict] = []
+    for sname, df_s in bt.items():
+        if df_s.empty:
+            continue
+        for _, row in df_s.iterrows():
+            d = int(row["draw"])
+            if d not in actual_by_draw:
+                continue
+            hit = int(row["hit_t0"]) if pd.notna(row.get("hit_t0")) else 0
+            cands = parse_nums(str(row.get("candidates", "")))
+            if cands:
+                records.append({"draw": d, "strategy": sname, "candidates": cands, "hit_t0": hit})
+
+    if not records:
+        log.warning("save_systematic_windows_excel: nessun record backtest")
+        return
+
+    all_draws = sorted({r["draw"] for r in records})
+    n_draws = len(all_draws)
+    log.info("Finestre sistematiche: %d draw totali, finestre da %d = %d finestre",
+             n_draws, window_size, n_draws // window_size)
+
+    # ── Raggruppa in finestre consecutive ─────────────────────────────────────
+    windows = []
+    for w_idx in range(n_draws // window_size):
+        w_draws = set(all_draws[w_idx * window_size: (w_idx + 1) * window_size])
+        w_recs = [r for r in records if r["draw"] in w_draws]
+
+        # Draw con 4+ hit in questa finestra
+        high_hit_draws = {r["draw"] for r in w_recs if r["hit_t0"] >= min_hit}
+        n_high = len(high_hit_draws)
+
+        # Numeri confermati (predetti E usciti) nei draw high-hit
+        confirmed: Counter = Counter()
+        for r in w_recs:
+            if r["draw"] in high_hit_draws:
+                actual = actual_by_draw[r["draw"]]
+                for n in r["candidates"] & actual:
+                    confirmed[n] += 1
+
+        top_nums = [n for n, _ in confirmed.most_common(8)]
+        top4_w = top_nums[:4]
+        top8_w = top_nums[:8]
+
+        windows.append({
+            "finestra":       w_idx + 1,
+            "draw_start":     min(w_draws),
+            "draw_end":       max(w_draws),
+            "draw_totali":    len(w_draws),
+            "draw_4plus_hit": n_high,
+            "top1": top4_w[0] if len(top4_w) > 0 else "",
+            "top2": top4_w[1] if len(top4_w) > 1 else "",
+            "top3": top4_w[2] if len(top4_w) > 2 else "",
+            "top4": top4_w[3] if len(top4_w) > 3 else "",
+            "top5": top8_w[4] if len(top8_w) > 4 else "",
+            "top6": top8_w[5] if len(top8_w) > 5 else "",
+            "top7": top8_w[6] if len(top8_w) > 6 else "",
+            "top8": top8_w[7] if len(top8_w) > 7 else "",
+            "confirmed_dict": dict(confirmed),
+        })
+
+    if not windows:
+        log.warning("Nessuna finestra creata")
+        return
+
+    # ── Foglio 1: Finestre ────────────────────────────────────────────────────
+    df_finestre = pd.DataFrame([{k: v for k, v in w.items() if k != "confirmed_dict"}
+                                 for w in windows])
+
+    # ── Foglio 2: Ranking numeri globale ─────────────────────────────────────
+    # conta in quante finestre ogni numero e' nel top-4 confermato
+    global_in_top4: Counter = Counter()
+    global_in_top8: Counter = Counter()
+    global_confirmed: Counter = Counter()
+
+    for w in windows:
+        top4_w = [w[f"top{i}"] for i in range(1, 5) if w[f"top{i}"] != ""]
+        top8_w = [w[f"top{i}"] for i in range(1, 9) if w[f"top{i}"] != ""]
+        for n in top4_w:
+            global_in_top4[n] += 1
+        for n in top8_w:
+            global_in_top8[n] += 1
+        for n, c in w["confirmed_dict"].items():
+            global_confirmed[n] += c
+
+    rows_rank = []
+    for num in range(1, 50):
+        rows_rank.append({
+            "numero":             num,
+            "finestre_in_top4":   global_in_top4.get(num, 0),
+            "finestre_in_top8":   global_in_top8.get(num, 0),
+            "totale_confermato":  global_confirmed.get(num, 0),
+        })
+    df_numeri = pd.DataFrame(rows_rank).sort_values("finestre_in_top4", ascending=False).reset_index(drop=True)
+    df_numeri["rank"] = range(1, len(df_numeri) + 1)
+
+    # ── Foglio 3: Coppie (co-occorrenze nel top-8 per finestra) ──────────────
+    pair_count: Counter = Counter()
+    for w in windows:
+        top8_w = [w[f"top{i}"] for i in range(1, 9) if w[f"top{i}"] != ""]
+        for i in range(len(top8_w)):
+            for j in range(i + 1, len(top8_w)):
+                pair = tuple(sorted([top8_w[i], top8_w[j]]))
+                pair_count[pair] += 1
+
+    rows_coppie = []
+    for (a, b), cnt in pair_count.most_common(50):
+        rows_coppie.append({"num_a": a, "num_b": b, "finestre_insieme": cnt})
+    df_coppie = pd.DataFrame(rows_coppie) if rows_coppie else pd.DataFrame()
+
+    # ── Foglio 4: Golden 6 ────────────────────────────────────────────────────
+    top4_global = df_numeri.head(4)["numero"].tolist()
+    # Coppia residua: tra i numeri non nel top4, quale coppia co-appare piu con top4?
+    coppia_score: Counter = Counter()
+    for (a, b), cnt in pair_count.items():
+        a_in = a in top4_global
+        b_in = b in top4_global
+        if a_in and not b_in:
+            coppia_score[b] += cnt
+        elif b_in and not a_in:
+            coppia_score[a] += cnt
+        elif not a_in and not b_in:
+            coppia_score[a] += cnt * 0.3
+            coppia_score[b] += cnt * 0.3
+
+    top2_residui = [n for n, _ in coppia_score.most_common(6) if n not in top4_global][:2]
+    golden6 = sorted(top4_global + top2_residui)
+
+    df_golden = pd.DataFrame([
+        {"posizione": i + 1, "numero": n,
+         "ruolo": "CORE (top4)" if n in top4_global else "COPPIA RESIDUA"}
+        for i, n in enumerate(golden6)
+    ])
+
+    # ── Scrivi Excel ──────────────────────────────────────────────────────────
+    out_path = out_dir / "golden_analysis.xlsx"
+    try:
+        with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+            df_finestre.to_excel(writer, sheet_name="Finestre", index=False)
+            df_numeri.to_excel(writer, sheet_name="Numeri_Ranking", index=False)
+            if not df_coppie.empty:
+                df_coppie.to_excel(writer, sheet_name="Coppie", index=False)
+            df_golden.to_excel(writer, sheet_name="Golden6", index=False)
+        log.info("Excel salvato: %s", out_path)
+    except Exception as e:
+        log.error("Errore scrittura Excel: %s", e)
+        return
+
+    log.info("Golden 6 (top4 + coppia residua): %s", golden6)
+    log.info("Top 4 global: %s | Coppia: %s", top4_global, top2_residui)
+
+
 def run_once(args: argparse.Namespace) -> None:
     log.info("=" * 60)
     log.info("Magic Lab run — %s", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -818,6 +1007,9 @@ def run_once(args: argparse.Namespace) -> None:
 
     # Bootstrap golden numbers (N iterazioni su campioni di 100 draw)
     bootstrap_golden_numbers(bt, df, n_iter=500, sample_size=100, min_hit=4, out_dir=OUT_DIR)
+
+    # Analisi sistematica su TUTTE le finestre di 100 draw → Excel
+    save_systematic_windows_excel(bt, df, window_size=100, min_hit=4, out_dir=OUT_DIR)
 
     # Next predictions
     next_preds = generate_next_predictions(df, args.freq_window, args.keep_top, ranking)
