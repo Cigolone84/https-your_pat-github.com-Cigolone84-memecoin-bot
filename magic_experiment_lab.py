@@ -963,6 +963,258 @@ def save_systematic_windows_excel(
     log.info("Top 4 global: %s | Coppia: %s", top4_global, top2_residui)
 
 
+def run_deep_analysis(args: argparse.Namespace) -> None:
+    """
+    Modalita' --deep-analysis:
+    Per ogni shift (lookback) in LOOKBACKS, esegue backtest completo su tutti i draw.
+    Per ogni draw N: "se 57 anni fa ero al draw N-shift, cosa prevedevo?"
+    Salva golden_analysis.xlsx con:
+      Grid_Hits     : ogni draw × ogni shift → hit_t0 (matrice completa)
+      Shift_Ranking : quale shift da piu draw con 4+ hit (in media e per periodo)
+      Finestre_100  : ogni 100 draw consecutivi → shift migliore + numeri top
+      Numeri_Ranking: ogni numero 1-49 ranked su quante volte confermato
+      Coppie        : top 50 coppie di numeri co-confermati
+      Golden6       : 4 numeri nucleo + 2 coppia residua
+    """
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        log.error("openpyxl non installato. Installa con: pip install openpyxl")
+        return
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    df = load_draws(limit=args.limit)
+    n = len(df)
+    log.info("Deep analysis — %d draw totali", n)
+
+    if n < 200:
+        log.error("Servono almeno 200 draw per il deep analysis.")
+        return
+
+    LOOKBACKS = [80, 90, 100, 110, 120, 130, 150, 175, 200]
+    WARMUP    = 60   # warmup ridotto per usare piu dati storici
+
+    # Mappa draw_num -> numeri reali
+    actual_by_draw: dict[int, frozenset] = {}
+    for _, row in df.iterrows():
+        d = int(row.get("draw", 0))
+        nums = parse_nums(row.get("Numeri Reali", ""))
+        if len(nums) == 6:
+            actual_by_draw[d] = nums
+
+    # ── Esegui backtest per ogni shift ────────────────────────────────────────
+    # risultati: shift -> { draw_num -> { strategy -> hit_t0 } }
+    shift_results: dict[int, dict[int, dict[str, int]]] = {}
+
+    for lb in LOOKBACKS:
+        log.info("Shift %d draw in corso...", lb)
+        bt = run_backtest(df, warmup=WARMUP, freq_window=lb)
+        per_draw: dict[int, dict[str, int]] = {}
+        for sname, df_s in bt.items():
+            if df_s.empty:
+                continue
+            for _, row in df_s.iterrows():
+                d = int(row["draw"])
+                hit = int(row["hit_t0"]) if pd.notna(row.get("hit_t0")) else 0
+                cands = str(row.get("candidates", ""))
+                per_draw.setdefault(d, {})[sname] = hit
+                per_draw[d][f"cands_{sname}_{lb}"] = cands
+        shift_results[lb] = per_draw
+        log.info("  Shift %d: %d draw valutati", lb, len(per_draw))
+
+    all_draws = sorted(
+        set(d for per in shift_results.values() for d in per.keys())
+        & set(actual_by_draw.keys())
+    )
+    log.info("Draw totali con dati completi: %d", len(all_draws))
+
+    # ── Foglio 1: Grid_Hits ───────────────────────────────────────────────────
+    # Una riga per draw, colonne: draw_num, actual, poi per ogni shift la hit_t0 migliore
+    grid_rows = []
+    for d in all_draws:
+        row_d: dict = {"draw": d, "numeri_reali": " ".join(f"{x:02d}" for x in sorted(actual_by_draw[d]))}
+        best_overall = 0
+        best_shift = 0
+        for lb in LOOKBACKS:
+            per = shift_results.get(lb, {}).get(d, {})
+            # max hit_t0 tra tutte le strategie per questo shift
+            hits = {s: v for s, v in per.items() if not s.startswith("cands_")}
+            max_hit = max(hits.values(), default=0) if hits else 0
+            row_d[f"shift_{lb}"] = max_hit
+            if max_hit > best_overall:
+                best_overall = max_hit
+                best_shift = lb
+        row_d["best_hit"]   = best_overall
+        row_d["best_shift"] = best_shift
+        grid_rows.append(row_d)
+
+    df_grid = pd.DataFrame(grid_rows)
+
+    # ── Foglio 2: Shift_Ranking ───────────────────────────────────────────────
+    shift_rank_rows = []
+    total = len(all_draws)
+    for lb in LOOKBACKS:
+        col = f"shift_{lb}"
+        if col not in df_grid.columns:
+            continue
+        vals = df_grid[col]
+        shift_rank_rows.append({
+            "shift":         lb,
+            "draw_valutati": total,
+            "hit_medio":     round(vals.mean(), 4),
+            "draw_con_3+":   int((vals >= 3).sum()),
+            "pct_3+":        f"{(vals >= 3).mean()*100:.2f}%",
+            "draw_con_4+":   int((vals >= 4).sum()),
+            "pct_4+":        f"{(vals >= 4).mean()*100:.2f}%",
+            "draw_con_5+":   int((vals >= 5).sum()),
+            "draw_con_6":    int((vals == 6).sum()),
+        })
+    df_shift_rank = pd.DataFrame(shift_rank_rows).sort_values("draw_con_4+", ascending=False)
+
+    # ── Foglio 3: Finestre_100 ────────────────────────────────────────────────
+    # Ogni 100 draw consecutivi: quale shift funziona meglio? Quali numeri top?
+    fin_rows = []
+    for w_idx in range(len(all_draws) // 100):
+        w_draws = all_draws[w_idx * 100: (w_idx + 1) * 100]
+        w_df = df_grid[df_grid["draw"].isin(w_draws)]
+
+        best_shift_w = 0
+        best_count_w = -1
+        for lb in LOOKBACKS:
+            col = f"shift_{lb}"
+            if col in w_df.columns:
+                cnt = int((w_df[col] >= 4).sum())
+                if cnt > best_count_w:
+                    best_count_w = cnt
+                    best_shift_w = lb
+
+        # Numeri piu confermati in questa finestra (con lo shift migliore)
+        confirmed_w: Counter = Counter()
+        for d in w_draws:
+            per = shift_results.get(best_shift_w, {}).get(d, {})
+            if not per:
+                continue
+            hits = {s: v for s, v in per.items() if not s.startswith("cands_")}
+            if max(hits.values(), default=0) >= 4:
+                actual = actual_by_draw.get(d, frozenset())
+                for s in STRATEGY_NAMES:
+                    cand_key = f"cands_{s}_{best_shift_w}"
+                    if cand_key in per:
+                        cands = parse_nums(str(per[cand_key]))
+                        for nn in cands & actual:
+                            confirmed_w[nn] += 1
+
+        top8_w = [n for n, _ in confirmed_w.most_common(8)]
+        fin_row = {
+            "finestra":       w_idx + 1,
+            "draw_start":     w_draws[0],
+            "draw_end":       w_draws[-1],
+            "shift_ottimale": best_shift_w,
+            "draw_con_4+":    best_count_w,
+        }
+        for i, n in enumerate(top8_w[:8], 1):
+            fin_row[f"num_{i}"] = n
+        fin_rows.append(fin_row)
+
+    df_finestre = pd.DataFrame(fin_rows)
+
+    # ── Foglio 4: Numeri_Ranking ──────────────────────────────────────────────
+    # Per ogni numero 1-49: quante volte confermato (predetto E uscito) in draw con 4+
+    global_confirmed: Counter = Counter()
+    global_predicted: Counter = Counter()
+
+    for lb in LOOKBACKS:
+        bt_lb = run_backtest(df, warmup=WARMUP, freq_window=lb)
+        for sname, df_s in bt_lb.items():
+            if df_s.empty:
+                continue
+            for _, row in df_s.iterrows():
+                d = int(row["draw"])
+                hit = int(row["hit_t0"]) if pd.notna(row.get("hit_t0")) else 0
+                cands = parse_nums(str(row.get("candidates", "")))
+                actual = actual_by_draw.get(d, frozenset())
+                for nn in cands:
+                    global_predicted[nn] += 1
+                if hit >= 4:
+                    for nn in cands & actual:
+                        global_confirmed[nn] += 1
+
+    num_rows = []
+    for num in range(1, 50):
+        conf = global_confirmed.get(num, 0)
+        pred = global_predicted.get(num, 0)
+        num_rows.append({
+            "numero":            num,
+            "volte_confermato":  conf,
+            "volte_predetto":    pred,
+            "tasso_conferma_%":  round(conf / pred * 100, 2) if pred > 0 else 0,
+        })
+    df_numeri = pd.DataFrame(num_rows).sort_values("volte_confermato", ascending=False).reset_index(drop=True)
+    df_numeri["rank"] = range(1, len(df_numeri) + 1)
+
+    # ── Foglio 5: Coppie ──────────────────────────────────────────────────────
+    pair_count: Counter = Counter()
+    for row_f in fin_rows:
+        nums_w = [row_f.get(f"num_{i}") for i in range(1, 9) if row_f.get(f"num_{i}")]
+        for i in range(len(nums_w)):
+            for j in range(i + 1, len(nums_w)):
+                pair_count[tuple(sorted([nums_w[i], nums_w[j]]))] += 1
+
+    df_coppie = pd.DataFrame(
+        [{"num_a": a, "num_b": b, "finestre_insieme": cnt}
+         for (a, b), cnt in pair_count.most_common(50)]
+    ) if pair_count else pd.DataFrame()
+
+    # ── Foglio 6: Golden6 ─────────────────────────────────────────────────────
+    top4 = [int(r["numero"]) for _, r in df_numeri.head(4).iterrows()]
+    coppia_score: Counter = Counter()
+    for (a, b), cnt in pair_count.items():
+        a_in = a in top4
+        b_in = b in top4
+        if a_in and not b_in:
+            coppia_score[b] += cnt
+        elif b_in and not a_in:
+            coppia_score[a] += cnt
+        elif not a_in and not b_in:
+            coppia_score[a] += cnt * 0.3
+            coppia_score[b] += cnt * 0.3
+
+    top2 = [n for n, _ in coppia_score.most_common(10) if n not in top4][:2]
+    golden6 = sorted(top4 + top2)
+
+    best_shift_global = int(df_shift_rank.iloc[0]["shift"]) if len(df_shift_rank) else 100
+    df_golden = pd.DataFrame(
+        [{"posizione": i + 1, "numero": n,
+          "ruolo": "CORE (top4)" if n in top4 else "COPPIA RESIDUA",
+          "shift_ottimale_globale": best_shift_global}
+         for i, n in enumerate(golden6)]
+    )
+
+    # ── Scrivi Excel ──────────────────────────────────────────────────────────
+    out_path = OUT_DIR / "golden_analysis.xlsx"
+    try:
+        with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+            df_grid.to_excel(writer,        sheet_name="Grid_Hits",      index=False)
+            df_shift_rank.to_excel(writer,  sheet_name="Shift_Ranking",  index=False)
+            df_finestre.to_excel(writer,    sheet_name="Finestre_100",   index=False)
+            df_numeri.to_excel(writer,      sheet_name="Numeri_Ranking", index=False)
+            if not df_coppie.empty:
+                df_coppie.to_excel(writer,  sheet_name="Coppie",         index=False)
+            df_golden.to_excel(writer,      sheet_name="Golden6",        index=False)
+        log.info("Deep analysis salvato: %s", out_path)
+    except Exception as e:
+        log.error("Errore scrittura Excel: %s", e)
+        return
+
+    log.info("GOLDEN 6: %s", golden6)
+    log.info("Shift ottimale globale: %d draw", best_shift_global)
+    log.info("Top 4: %s | Coppia: %s", top4, top2)
+    log.info(
+        "Shift ranking (per draw con 4+):\n%s",
+        df_shift_rank[["shift", "draw_con_4+", "pct_4+"]].to_string(index=False),
+    )
+
+
 def run_once(args: argparse.Namespace) -> None:
     log.info("=" * 60)
     log.info("Magic Lab run — %s", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -1034,6 +1286,8 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=120, help="Draw iniziali di riscaldamento da saltare")
     p.add_argument("--freq-window", type=int, default=100, help="Finestra draw per calcolo frequenza")
     p.add_argument("--keep-top", type=int, default=5, help="Tieni top N strategie per prossima previsione")
+    p.add_argument("--deep-analysis", action="store_true",
+                   help="Analisi profonda: griglia di shift su tutti i draw -> golden_analysis.xlsx")
     args = p.parse_args()
 
     # Attach file log
@@ -1044,7 +1298,13 @@ def main() -> int:
     except Exception:
         pass
 
-    if args.loop:
+    if args.deep_analysis:
+        try:
+            run_deep_analysis(args)
+        except Exception as exc:
+            log.error("Errore deep analysis: %s", exc, exc_info=True)
+            return 1
+    elif args.loop:
         while True:
             try:
                 run_once(args)

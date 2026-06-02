@@ -1007,6 +1007,14 @@ class AgentApp:
             ("📋 Log",        lambda: self._send("Mostrami gli ultimi log.")),
             ("⬇️ Aggiorna",  lambda: self._send("Aggiorna Magic Dream da GitHub.")),
             ("🌐 Apri App3",  lambda: self._send("Apri App3 nel browser.")),
+            ("🔭 Deep Analysis", lambda: self._send(
+                "Avvia la deep analysis: esegui in background "
+                "python magic_experiment_lab.py --deep-analysis "
+                "usando start_worker se il comando non esiste, altrimenti "
+                "usa write_file per creare un .bat che lancia il comando, "
+                "poi apri il terminale. Dimmi quando golden_analysis.xlsx e' pronto "
+                "nella cartella magic_lab."
+            )),
             ("🆚 Confronta",  lambda: self._send(
                 "Confronta App1 (ML lotto) vs Magic Dream (strategie statistiche). "
                 "Usa il tool compare_systems e dimmi quale dei due sistemi performa meglio, "
