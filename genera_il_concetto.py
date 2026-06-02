@@ -171,16 +171,19 @@ kv(">>> MANCANO ANCORA ALL'APPELLO <<<", mancano)
 kv("Streak finale sbagliate consecutive", streak)
 kv("-> dettaglio nel foglio 'Ultime_100'", "")
 sep("")
-sep("══════════ PASSO 4 — STASERA (ci mettiamo nel 2%, escluso il 98%) ══════════")
-kv("TOP 4 stasera", " ".join(f"{n:02d}" for n in stasera_4))
-kv("TOP 6 stasera", " ".join(f"{n:02d}" for n in stasera_6))
+sep("══════════ PASSO 4 — STASERA NEL 2%: ESCLUSIONE COMPLETATA ══════════")
+kv("PREVISIONI GIA' SBAGLIATE nella finestra (escluse)", WIN - g_att)
+kv("GIUSTE GIA' USCITE nella finestra", g_att)
+kv("ATTESE su 100 (R x 100)", f"{attesi:.1f}")
+kv(">>> MANCANO ANCORA ALL'APPELLO <<<", mancano)
+kv("Streak finale sbagliate consecutive", streak)
 sep("")
-kv("LOGICA", (
-    f"Su 100 previsioni la frequenza dice ~{round(attesi)} giuste. "
-    f"Nella finestra attuale ne sono uscite {g_att}, quindi MANCANO ANCORA {mancano}. "
-    f"Le ultime {streak} sono sbagliate di fila: stasera e' uno dei {mancano} posti "
-    f"che restano all'appello. Numeri: {' '.join(f'{n:02d}' for n in stasera_6)}."
-))
+kv("════ CONCLUSIONE ════", "")
+kv(f"DATI SPERIMENTALI: {total} previsioni reali -> R = {R*100:.2f}%", "")
+kv(f"FINESTRA ATTUALE: {WIN-g_att} escluse, {g_att} giuste", "")
+kv(f"STASERA e' uno dei posti che MANCANO ANCORA ALL'APPELLO", "")
+kv("▶▶▶  STASERA TOP 6:", " ".join(f"{n:02d}" for n in stasera_6))
+kv("▶▶▶  STASERA TOP 4:", " ".join(f"{n:02d}" for n in stasera_4))
 df_concetto = pd.DataFrame(righe)
 
 # Foglio ultime 100
@@ -241,10 +244,9 @@ riepilogo = pd.DataFrame([
      "VALORE": results[-1]["streak_sbagliate"]},
     {"VOCE": "CONCLUSIONE",
      "VALORE": (
-         f"Le {n_g} volte storiche in cui siamo stati nel 2%, "
-         f"i numeri piu' spesso coinvolti nelle azzeccate erano: "
-         f"{' '.join(f'{n:02d}' for n,_ in voti_numeri_azzeccati.most_common(6))}. "
-         f"Lo streak attuale e' {results[-1]['streak_sbagliate']} sbagliate consecutive."
+         f"Dati sperimentali: {n_g} volte nel {R*100:.2f}% su {total} previsioni reali. "
+         f"Streak attuale: {results[-1]['streak_sbagliate']} sbagliate consecutive. "
+         f">>> STASERA: {' '.join(f'{n:02d}' for n,_ in voti_numeri_azzeccati.most_common(6))}"
      )},
 ])
 
