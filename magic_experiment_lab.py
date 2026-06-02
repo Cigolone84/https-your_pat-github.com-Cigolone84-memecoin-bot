@@ -1489,10 +1489,175 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     df_stasera    = pd.DataFrame(stasera_rows)
     df_consenso   = pd.DataFrame(consenso_rows)
 
+    # ────────────────── FOGLIO Ciclo_Scadenza ─────────────────────────────────
+    # "Certezza per esclusione":
+    # Su N draw storici, i 4+ hit escono ogni G draw in media.
+    # Il gap attuale (draw dall'ultimo hit) rispetto alla distribuzione storica
+    # determina P(stasera) con la funzione di sopravvivenza condizionale.
+    # Se gap_attuale >= percentile 90% dei gap storici => siamo in zona SCADUTA.
+    log.info("Calcolo analisi ciclo/scadenza (certezza per esclusione)...")
+    best_per_ciclo = shift_results.get(best_shift_recent, {})
+    hit_events: list[int] = []
+    for d in all_draws:
+        d_data = best_per_ciclo.get(d, {})
+        max_hit_d = max((d_data.get(f"hit_{s}", 0) for s in STRATEGY_NAMES), default=0)
+        if max_hit_d >= MIN_HIT:
+            hit_events.append(d)
+
+    gaps_ciclo: list[int] = [hit_events[i] - hit_events[i - 1] for i in range(1, len(hit_events))]
+
+    if gaps_ciclo:
+        total_gaps   = len(gaps_ciclo)
+        avg_gap      = sum(gaps_ciclo) / total_gaps
+        sorted_gaps  = sorted(gaps_ciclo)
+        median_gap   = sorted_gaps[total_gaps // 2]
+        max_gap_h    = sorted_gaps[-1]
+        min_gap_h    = sorted_gaps[0]
+        p90_gap      = sorted_gaps[int(total_gaps * 0.90)]
+        p95_gap      = sorted_gaps[int(total_gaps * 0.95)]
+        p99_gap      = sorted_gaps[int(min(total_gaps - 1, total_gaps * 0.99))]
+
+        last_hit_draw = hit_events[-1]
+        current_gap   = all_draws[-1] - last_hit_draw
+
+        # Funzione di sopravvivenza empirica: S(k) = P(gap > k)
+        def survival(k: int) -> float:
+            return sum(1 for g in gaps_ciclo if g > k) / total_gaps
+
+        s_k   = survival(current_gap)
+        s_km1 = survival(max(0, current_gap - 1))
+        s_k1  = survival(current_gap + 1)
+        s_k3  = survival(current_gap + 3)
+        s_k5  = survival(current_gap + 5)
+        s_k10 = survival(current_gap + 10)
+
+        # P(hit in ESATTAMENTE il prossimo draw | dry per current_gap draw)
+        p_tonight_gap = (s_km1 - s_k) / s_km1 if s_km1 > 0 else 1.0
+        # P(hit entro 3 draw | dry per current_gap)
+        p_3 = (s_km1 - s_k3) / s_km1 if s_km1 > 0 else 1.0
+        # P(hit entro 5 draw)
+        p_5 = (s_km1 - s_k5) / s_km1 if s_km1 > 0 else 1.0
+        # P(hit entro 10 draw)
+        p_10 = (s_km1 - s_k10) / s_km1 if s_km1 > 0 else 1.0
+
+        # Percentile del gap attuale: % dei gap storici <= current_gap
+        overdue_pct = sum(1 for g in gaps_ciclo if g <= current_gap) / total_gaps * 100
+
+        if overdue_pct >= 99:
+            status = "SCADUTISSIMO — certezza storica massima, 99°+ percentile"
+        elif overdue_pct >= 95:
+            status = "SCADUTO AL MASSIMO — 95°+ percentile, P(stasera) altissima"
+        elif overdue_pct >= 90:
+            status = "MOLTO SCADUTO — 90°+ percentile, zona di alta attesa"
+        elif overdue_pct >= 75:
+            status = "SCADUTO — 75°+ percentile, sopra la media"
+        elif overdue_pct >= 50:
+            status = "NELLA MEDIA — il gap e' nella meta' superiore"
+        else:
+            status = "FRESCO — gap ancora basso, non in scadenza"
+
+        ciclo_summary = [
+            {"metrica": "CONCETTO 'CERTEZZA PER ESCLUSIONE'",
+             "valore": (
+                 f"Su {len(all_draws)} draw storici il 4+ hit esce ogni {avg_gap:.1f} draw in media. "
+                 f"Se negli ultimi {current_gap} draw non e' uscito nessun 4+ hit, per esclusione "
+                 f"la probabilita' di stasera e' massima."
+             )},
+            {"metrica": "---", "valore": ""},
+            {"metrica": "Shift usato",                    "valore": best_shift_recent},
+            {"metrica": "Draw totali analizzati",         "valore": len(all_draws)},
+            {"metrica": "Hit 4+ totali trovati",          "valore": len(hit_events)},
+            {"metrica": "Frequenza hit",                  "valore": f"1 ogni {avg_gap:.1f} draw ({1/avg_gap*100:.2f}%)"},
+            {"metrica": "Gap medio tra hit consecutivi",  "valore": round(avg_gap, 1)},
+            {"metrica": "Gap mediano",                    "valore": median_gap},
+            {"metrica": "Gap minimo storico",             "valore": min_gap_h},
+            {"metrica": "Gap massimo storico",            "valore": max_gap_h},
+            {"metrica": "Percentile 90% dei gap",         "valore": p90_gap},
+            {"metrica": "Percentile 95% dei gap",         "valore": p95_gap},
+            {"metrica": "Percentile 99% dei gap",         "valore": p99_gap},
+            {"metrica": "---", "valore": ""},
+            {"metrica": "Ultimo 4+ hit al draw n.",       "valore": last_hit_draw},
+            {"metrica": "Ultimo draw analizzato",         "valore": all_draws[-1]},
+            {"metrica": "GAP ATTUALE",                    "valore": current_gap},
+            {"metrica": "Percentile gap attuale",         "valore": f"{overdue_pct:.1f}% dei gap storici erano <= {current_gap} draw"},
+            {"metrica": "STATUS",                         "valore": status},
+            {"metrica": "---", "valore": ""},
+            {"metrica": "P(4+ hit stasera)",              "valore": f"{p_tonight_gap*100:.2f}%"},
+            {"metrica": "P(4+ hit entro 3 draw)",         "valore": f"{p_3*100:.2f}%"},
+            {"metrica": "P(4+ hit entro 5 draw)",         "valore": f"{p_5*100:.2f}%"},
+            {"metrica": "P(4+ hit entro 10 draw)",        "valore": f"{p_10*100:.2f}%"},
+            {"metrica": "---", "valore": ""},
+            {"metrica": "INTERPRETAZIONE",                "valore": (
+                f"Su {total_gaps} gap storici, il {overdue_pct:.0f}% era <= {current_gap} draw. "
+                f"Quindi solo il {100-overdue_pct:.0f}% dei cicli storici ha SUPERATO il gap attuale "
+                f"senza un 4+ hit. Con P(stasera)={p_tonight_gap*100:.1f}%, stasera e' "
+                + ("la draw PIU' PROBABILE della storia recente." if overdue_pct >= 90
+                   else "in zona di attesa elevata." if overdue_pct >= 75
+                   else "nella norma statistica.")
+            )},
+        ]
+        df_ciclo_summary = pd.DataFrame(ciclo_summary)
+
+        # Distribuzione dei gap (istogramma)
+        gap_counter_ciclo = Counter(gaps_ciclo)
+        cumul = 0
+        gap_dist_rows = []
+        for g in sorted(gap_counter_ciclo.keys()):
+            cnt = gap_counter_ciclo[g]
+            cumul += cnt
+            gap_dist_rows.append({
+                "gap_draw":         g,
+                "n_volte":          cnt,
+                "pct_%":            round(cnt / total_gaps * 100, 2),
+                "cumulativo_%":     round(cumul / total_gaps * 100, 2),
+                "note":             ("← GAP ATTUALE" if g == current_gap
+                                     else "← P90" if g == p90_gap
+                                     else "← P95" if g == p95_gap
+                                     else "← P99" if g == p99_gap
+                                     else "← SUPERATO" if g < current_gap else ""),
+            })
+        df_gap_dist = pd.DataFrame(gap_dist_rows)
+
+        # Ultimi 30 eventi hit con gap
+        last30_start = max(0, len(hit_events) - 30)
+        df_ultimi_hit = pd.DataFrame([
+            {
+                "draw_hit":              hit_events[i],
+                "gap_dal_precedente":    hit_events[i] - hit_events[i - 1] if i > 0 else 0,
+                "sopra_media":           "SI" if (i > 0 and hit_events[i] - hit_events[i-1] > avg_gap) else "",
+            }
+            for i in range(last30_start, len(hit_events))
+        ])
+
+        log.info("Ciclo: %d hit in %d draw, gap medio=%.1f, gap attuale=%d, overdue=%.1f%%, P(stasera)=%.2f%%",
+                 len(hit_events), len(all_draws), avg_gap, current_gap, overdue_pct, p_tonight_gap * 100)
+
+        # Aggiungi riga CICLO_SCADENZA al foglio Stasera
+        stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0, "shift_usato": "", "motivo_shift": ""})
+        stasera_rows.append({
+            "strategia":    "CICLO_STATUS",
+            "numeri":       f"Gap attuale: {current_gap} draw | P(stasera): {p_tonight_gap*100:.1f}%",
+            "n_numeri":     0,
+            "shift_usato":  best_shift_recent,
+            "motivo_shift": status + f" | overdue {overdue_pct:.0f}% | P(3 draw)={p_3*100:.1f}%",
+        })
+        # Ricostruisci df_stasera con la riga CICLO_STATUS aggiunta
+        df_stasera = pd.DataFrame(stasera_rows)
+    else:
+        df_ciclo_summary = pd.DataFrame([{"metrica": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
+        df_gap_dist      = pd.DataFrame()
+        df_ultimi_hit    = pd.DataFrame()
+        log.warning("Ciclo_Scadenza: nessun evento 4+ hit trovato con shift=%d", best_shift_recent)
+
     # ────────────────── Scrivi Excel ──────────────────────────────────────────
     out_path = OUT_DIR / "golden_analysis.xlsx"
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+            df_ciclo_summary.to_excel(writer,  sheet_name="Ciclo_Scadenza",  index=False)
+            if not df_gap_dist.empty:
+                df_gap_dist.to_excel(writer,   sheet_name="Gap_Distribuzione", index=False)
+            if not df_ultimi_hit.empty:
+                df_ultimi_hit.to_excel(writer, sheet_name="Ultimi_Hit",       index=False)
             df_grid.to_excel(writer,         sheet_name="Grid_Hits",        index=False)
             df_shift_rank.to_excel(writer,   sheet_name="Shift_Ranking",    index=False)
             df_finestre.to_excel(writer,     sheet_name="Finestre_100",     index=False)
@@ -1519,7 +1684,8 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     log.info("Consenso top4 stasera:         %s",             sorted(top4_s))
     log.info("CONVERGENZA storica top4 (%d finestre): %s",    n_finestre, sorted(top4_conv))
     log.info("CONVERGENZA storica top6:               %s",    sorted(top6_conv))
-    log.info("Fogli Excel: Grid_Hits | Shift_Ranking | Finestre_100 | Convergenza |")
+    log.info("Fogli Excel: Ciclo_Scadenza | Gap_Distribuzione | Ultimi_Hit |")
+    log.info("             Grid_Hits | Shift_Ranking | Finestre_100 | Convergenza |")
     log.info("             Numeri_Ranking | Coppie | Golden6 | RitornoAlFuturo |")
     log.info("             Stasera | Stasera_Consenso | Kumulacja")
     log.info("=" * 60)
