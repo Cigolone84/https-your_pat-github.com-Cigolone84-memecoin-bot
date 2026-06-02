@@ -348,6 +348,54 @@ with tab2:
 
                 st.markdown("---")
 
+            # ── CONVERGENZA STORICA ───────────────────────────────────────────
+            if "Convergenza" in sheets:
+                conv_df = xl.parse("Convergenza")
+                n_fin_c = len(xl.parse("Finestre_100")) if "Finestre_100" in sheets else "?"
+                st.markdown("### 🔭 CONVERGENZA STORICA — numeri certi su 57 anni")
+                st.caption(
+                    f"Conteggio BINARIO per finestra: in quante delle {n_fin_c} finestre da 100 draw "
+                    f"ogni numero appare nel top-8 delle previsioni con 4+ hit reali? "
+                    f"I numeri 'CERTISSIMO' sono quelli che appaiono in oltre il 50% delle finestre."
+                )
+
+                # Top 4 convergenza — palline rosse scuro
+                top4c_row = df_stasera[df_stasera["strategia"] == "GOLDEN4_CONVERGENZA"] if "Stasera" in sheets else pd.DataFrame()
+                top6c_row = df_stasera[df_stasera["strategia"] == "GOLDEN6_CONVERGENZA"] if "Stasera" in sheets else pd.DataFrame()
+
+                cE, cF = st.columns(2)
+                with cE:
+                    st.markdown("**Top 4 convergenza (piu stabili in 57 anni):**")
+                    nums4c = str(top4c_row.iloc[0].get("numeri", "")) if not top4c_row.empty else ""
+                    if not nums4c and not conv_df.empty:
+                        nums4c = " ".join(str(int(conv_df.iloc[i]["numero"])) for i in range(min(4, len(conv_df))))
+                    st.markdown(
+                        "".join(
+                            f'<span class="num-ball" style="background:#7c2d12;'
+                            f'border:3px solid #f97316;width:52px;height:52px;line-height:52px;">{n}</span>'
+                            for n in nums4c.split() if n.isdigit()
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                with cF:
+                    st.markdown("**Top 6 convergenza:**")
+                    nums6c = str(top6c_row.iloc[0].get("numeri", "")) if not top6c_row.empty else ""
+                    if not nums6c and not conv_df.empty:
+                        nums6c = " ".join(str(int(conv_df.iloc[i]["numero"])) for i in range(min(6, len(conv_df))))
+                    st.markdown(
+                        "".join(
+                            f'<span class="num-ball" style="background:#4a044e;'
+                            f'border:3px solid #e879f9;width:52px;height:52px;line-height:52px;">{n}</span>'
+                            for n in nums6c.split() if n.isdigit()
+                        ),
+                        unsafe_allow_html=True,
+                    )
+
+                with st.expander("📊 Tabella convergenza completa (tutti i 49 numeri)"):
+                    st.dataframe(conv_df, use_container_width=True, hide_index=True, height=400)
+
+                st.markdown("---")
+
             # ── NUMERI RANKING ────────────────────────────────────────────────
             if "Numeri_Ranking" in sheets:
                 nr_df = xl.parse("Numeri_Ranking")

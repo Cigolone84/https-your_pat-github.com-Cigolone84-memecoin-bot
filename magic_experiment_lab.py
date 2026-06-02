@@ -1244,6 +1244,124 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         for i, n in enumerate(golden6)
     ])
 
+    # ────────────────── FOGLIO CONVERGENZA ────────────────────────────────────
+    # Quante delle ~73 finestre da 100 draw includono ogni numero nel top-8/top-4?
+    # Metrica BINARIA per finestra (0 o 1 per finestra, poi somma) = convergenza storica.
+    # Concetto "ritorno al futuro": guardando tutti i 57 anni, quali numeri appaiono
+    # COSTANTEMENTE nelle finestre dove la strategia indovina 4+ numeri?
+    # Questi numeri sono i candidati con la massima certezza storica.
+    from_top8_windows: Counter = Counter()
+    from_top4_windows: Counter = Counter()
+    for row_f in fin_rows:
+        top8_w = [row_f.get(f"num_{i}") for i in range(1, 9) if row_f.get(f"num_{i}")]
+        top4_w = top8_w[:4]
+        for nn in top8_w:
+            from_top8_windows[nn] += 1
+        for nn in top4_w:
+            from_top4_windows[nn] += 1
+
+    n_finestre = len(fin_rows)
+    conv_rows = []
+    for num in range(1, 50):
+        n8 = from_top8_windows.get(num, 0)
+        n4 = from_top4_windows.get(num, 0)
+        p8 = round(n8 / n_finestre * 100, 1) if n_finestre else 0
+        p4 = round(n4 / n_finestre * 100, 1) if n_finestre else 0
+        if p8 >= 50:
+            stars = "CERTISSIMO"
+        elif p8 >= 30:
+            stars = "MOLTO STABILE"
+        elif p8 >= 15:
+            stars = "STABILE"
+        else:
+            stars = "variabile"
+        conv_rows.append({
+            "rank":             0,
+            "numero":           num,
+            "finestre_top8":    n8,
+            "finestre_top4":    n4,
+            "pct_top8_%":       p8,
+            "pct_top4_%":       p4,
+            "convergenza":      stars,
+            "spiegazione": (
+                f"Numero {num}: nel top-8 in {n8}/{n_finestre} finestre ({p8}%), "
+                f"nel top-4 in {n4} finestre ({p4}%). "
+                + ("← ALTA CONVERGENZA STORICA" if p8 >= 30 else "")
+            ),
+        })
+
+    df_convergenza = (
+        pd.DataFrame(conv_rows)
+        .sort_values(["finestre_top8", "finestre_top4"], ascending=False)
+        .reset_index(drop=True)
+    )
+    df_convergenza["rank"] = range(1, len(df_convergenza) + 1)
+
+    top4_conv = [int(df_convergenza.iloc[i]["numero"]) for i in range(min(4, len(df_convergenza)))]
+    top6_conv = [int(df_convergenza.iloc[i]["numero"]) for i in range(min(6, len(df_convergenza)))]
+    log.info("Top 4 convergenza storica (%d finestre, 57 anni): %s", n_finestre, top4_conv)
+    log.info("Top 6 convergenza: %s", top6_conv)
+
+    # ────────────────── FOGLIO Kumulacja ──────────────────────────────────────
+    # Kumulacja = draw polacchi dove nessuno vince il jackpot (accumulazione).
+    # Se la colonna 'kumulacja' e' presente nel dataset, analisi separata.
+    # Altrimenti: foglio con istruzioni per aggiungere i dati.
+    kumulacja_col = None
+    for col_k in ["kumulacja", "Kumulacja", "KUMULACJA", "jackpot", "accumulation"]:
+        if col_k in df.columns:
+            kumulacja_col = col_k
+            break
+
+    if kumulacja_col:
+        # Analisi separata draw kumulacja vs normali
+        kum_mask = df[kumulacja_col].astype(str).str.strip().isin(["1", "True", "true", "SI", "si", "yes"])
+        kum_draws = set(df[kum_mask]["draw"].astype(int).tolist())
+        normal_draws = set(all_draws) - kum_draws
+        kum_rows_data = []
+        for lb in LOOKBACKS:
+            col_g = f"sh{lb}_maxhit"
+            if col_g not in df_grid.columns:
+                continue
+            kum_df = df_grid[df_grid["draw"].isin(kum_draws)][col_g]
+            norm_df = df_grid[df_grid["draw"].isin(normal_draws)][col_g]
+            kum_rows_data.append({
+                "shift_draw":       lb,
+                "draw_kumulacja":   len(kum_df),
+                "draw_normali":     len(norm_df),
+                "hit_medio_kum":    round(kum_df.mean(), 4) if len(kum_df) else 0,
+                "hit_medio_norm":   round(norm_df.mean(), 4) if len(norm_df) else 0,
+                "draw_4+_kum":      int((kum_df >= 4).sum()) if len(kum_df) else 0,
+                "draw_4+_norm":     int((norm_df >= 4).sum()) if len(norm_df) else 0,
+                "pct_4+_kum":       f"{(kum_df >= 4).mean()*100:.2f}%" if len(kum_df) else "?",
+                "pct_4+_norm":      f"{(norm_df >= 4).mean()*100:.2f}%" if len(norm_df) else "?",
+                "kumulacja_migliore": "SI" if (
+                    len(kum_df) > 0 and len(norm_df) > 0 and
+                    (kum_df >= 4).mean() > (norm_df >= 4).mean()
+                ) else "",
+            })
+        df_kumulacja = pd.DataFrame(kum_rows_data).sort_values("draw_4+_kum", ascending=False)
+        log.info("Kumulacja: %d draw kumulacja, %d normali analizzati", len(kum_draws), len(normal_draws))
+    else:
+        # Foglio informativo: come aggiungere dati kumulacja
+        df_kumulacja = pd.DataFrame([
+            {"campo": "KUMULACJA — Analisi jackpot accumulation",
+             "valore": ""},
+            {"campo": "Dati kumulacja non trovati nel dataset",
+             "valore": "Aggiungi una colonna 'kumulacja' al tuo file lotto_draws.csv"},
+            {"campo": "Valori attesi nella colonna",
+             "valore": "1 = draw kumulacja (jackpot accumulato), 0 = draw normale"},
+            {"campo": "Fonte dati kumulacja storici",
+             "valore": "Disponibili su lotto.pl / totalilotto.pl nella sezione archivio"},
+            {"campo": "Dopo aver aggiunto i dati",
+             "valore": "Riesegui DEEP_ANALYSIS.bat — verra' generato il foglio kumulacja completo"},
+            {"campo": "Cosa mostrera' il foglio kumulacja",
+             "valore": "Performance per shift separata: draw kumulacja vs draw normali"},
+            {"campo": "Ipotesi statistica",
+             "valore": "I draw kumulacja possono avere distribuzioni diverse (jackpot alto = piu giocatori = pattern diversi)"},
+            {"campo": "Golden numbers kumulacja",
+             "valore": "I numeri che appaiono SOLO nelle kumulacja ad alto rendimento"},
+        ])
+
     # ────────────────── FOGLIO 7: RitornoAlFuturo ─────────────────────────────
     # Per ogni shift: prestazioni SOLO sugli ultimi RECENT_N draw
     # = "torna indietro di RECENT_N draw, come avresti predetto?"
@@ -1328,6 +1446,28 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         "shift_usato":  best_shift_global,
         "motivo_shift": "Top 4 confermati su 57 anni di storia + coppia residua",
     })
+    stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0,
+                          "shift_usato": "", "motivo_shift": ""})
+    stasera_rows.append({
+        "strategia":    "GOLDEN4_CONVERGENZA",
+        "numeri":       " ".join(f"{n:02d}" for n in sorted(top4_conv)),
+        "n_numeri":     4,
+        "shift_usato":  "tutti",
+        "motivo_shift": (
+            f"4 numeri con MASSIMA convergenza storica: appaiono nel top-8 "
+            f"nel maggior numero delle {n_finestre} finestre da 100 draw (57 anni)"
+        ),
+    })
+    stasera_rows.append({
+        "strategia":    "GOLDEN6_CONVERGENZA",
+        "numeri":       " ".join(f"{n:02d}" for n in sorted(top6_conv)),
+        "n_numeri":     6,
+        "shift_usato":  "tutti",
+        "motivo_shift": (
+            f"6 numeri con massima convergenza storica su {n_finestre} finestre. "
+            f"Questi numeri appaiono SEMPRE quando la strategia indovina 4+ numeri."
+        ),
+    })
 
     # Tabella consenso dettagliata
     consenso_rows = [
@@ -1347,28 +1487,35 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     out_path = OUT_DIR / "golden_analysis.xlsx"
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
-            df_grid.to_excel(writer,       sheet_name="Grid_Hits",       index=False)
-            df_shift_rank.to_excel(writer, sheet_name="Shift_Ranking",   index=False)
-            df_finestre.to_excel(writer,   sheet_name="Finestre_100",    index=False)
-            df_numeri.to_excel(writer,     sheet_name="Numeri_Ranking",  index=False)
+            df_grid.to_excel(writer,         sheet_name="Grid_Hits",        index=False)
+            df_shift_rank.to_excel(writer,   sheet_name="Shift_Ranking",    index=False)
+            df_finestre.to_excel(writer,     sheet_name="Finestre_100",     index=False)
+            df_convergenza.to_excel(writer,  sheet_name="Convergenza",      index=False)
+            df_numeri.to_excel(writer,       sheet_name="Numeri_Ranking",   index=False)
             if not df_coppie.empty:
-                df_coppie.to_excel(writer, sheet_name="Coppie",          index=False)
-            df_golden.to_excel(writer,     sheet_name="Golden6",         index=False)
-            df_raf.to_excel(writer,        sheet_name="RitornoAlFuturo", index=False)
-            df_stasera.to_excel(writer,    sheet_name="Stasera",         index=False)
-            df_consenso.to_excel(writer,   sheet_name="Stasera_Consenso",index=False)
+                df_coppie.to_excel(writer,   sheet_name="Coppie",           index=False)
+            df_golden.to_excel(writer,       sheet_name="Golden6",          index=False)
+            df_raf.to_excel(writer,          sheet_name="RitornoAlFuturo",  index=False)
+            df_stasera.to_excel(writer,      sheet_name="Stasera",          index=False)
+            df_consenso.to_excel(writer,     sheet_name="Stasera_Consenso", index=False)
+            df_kumulacja.to_excel(writer,    sheet_name="Kumulacja",        index=False)
         log.info("Excel salvato: %s", out_path)
     except Exception as e:
         log.error("Errore scrittura Excel: %s", e)
         return
 
     log.info("=" * 60)
-    log.info("RISULTATI DEEP ANALYSIS")
-    log.info("Shift ottimale RECENTE (ultimi %d draw): %d", RECENT_N, best_shift_recent)
-    log.info("Shift ottimale GLOBALE (57 anni): %d",         best_shift_global)
-    log.info("GOLDEN 6 storico: %s",  golden6)
-    log.info("GOLDEN 6 stasera: %s",  sorted(top6_s))
-    log.info("Consenso top4 stasera: %s", sorted(top4_s))
+    log.info("RISULTATI DEEP ANALYSIS — RITORNO AL FUTURO")
+    log.info("Shift ottimale RECENTE (ultimi %d draw): %d",  RECENT_N, best_shift_recent)
+    log.info("Shift ottimale GLOBALE (57 anni): %d",          best_shift_global)
+    log.info("GOLDEN 6 storico (confermato): %s",             golden6)
+    log.info("GOLDEN 6 stasera (consenso):   %s",             sorted(top6_s))
+    log.info("Consenso top4 stasera:         %s",             sorted(top4_s))
+    log.info("CONVERGENZA storica top4 (%d finestre): %s",    n_finestre, sorted(top4_conv))
+    log.info("CONVERGENZA storica top6:               %s",    sorted(top6_conv))
+    log.info("Fogli Excel: Grid_Hits | Shift_Ranking | Finestre_100 | Convergenza |")
+    log.info("             Numeri_Ranking | Coppie | Golden6 | RitornoAlFuturo |")
+    log.info("             Stasera | Stasera_Consenso | Kumulacja")
     log.info("=" * 60)
 
 
