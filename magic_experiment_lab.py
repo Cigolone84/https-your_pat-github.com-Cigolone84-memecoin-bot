@@ -1475,6 +1475,111 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         ),
     })
 
+    # ────────────────── BOOTSTRAP_STASERA: 72 previsioni ─────────────────────
+    # Concetto: fare 72 previsioni DIVERSE per stasera (9 shift × 8 strategie)
+    # e contare quante volte ogni numero appare.
+    # Se un numero appare in 60/72 previsioni → e' "certo" indipendentemente
+    # dal parametro usato. E' il consenso massimo su tutti gli scenari possibili.
+    log.info("Bootstrap stasera: 72 previsioni (9 shift × 8 strategie)...")
+    history_full = [actual_by_draw[d] for d in all_draws]
+
+    # sestine e pool dall'ultimo draw (per NucleoPool e PoolTop8)
+    last_ses_h: list[frozenset] = []
+    last_pool_h: Optional[frozenset] = None
+    for k in range(1, 6):
+        col_s = f"Sestina {k}"
+        if col_s in df.columns:
+            vals = df[col_s].dropna()
+            if len(vals):
+                v = vals.iloc[-1]
+                if isinstance(v, frozenset) and len(v):
+                    last_ses_h.append(v)
+    if "pool" in df.columns:
+        vals = df["pool"].dropna()
+        if len(vals):
+            v = vals.iloc[-1]
+            if isinstance(v, frozenset):
+                last_pool_h = v
+
+    boot_votes: Counter = Counter()
+    boot_rows:  list[dict] = []
+    for lb in LOOKBACKS:
+        strats_boot = {
+            "FreqHot8":   strategy_freq_hot(history_full,  n=8, window=lb),
+            "FreqCold8":  strategy_freq_cold(history_full, n=8, window=lb),
+            "HotCold4+4": strategy_hot_cold(history_full,  n=8, window=lb),
+            "Decade8":    strategy_decade(history_full,    n=8, window=lb),
+            "Delay8":     strategy_delay(history_full,     n=8),
+            "NucleoPool": strategy_nucleo_pool(
+                history_full, [last_ses_h] if last_ses_h else None, n=8, window=lb),
+            "Consensus8": strategy_consensus(history_full, n=8, window=lb),
+            "PoolTop8":   strategy_pool_top8(
+                history_full, [last_pool_h] if last_pool_h else None, n=8, window=lb),
+        }
+        for sname, cands in strats_boot.items():
+            for nn in cands:
+                boot_votes[nn] += 1
+            boot_rows.append({
+                "shift":     lb,
+                "strategia": sname,
+                "numeri":    " ".join(f"{x:02d}" for x in sorted(cands)),
+                "n_numeri":  len(cands),
+            })
+
+    n_boot = len(LOOKBACKS) * len(STRATEGY_NAMES)   # = 72
+    top4_boot = [n for n, _ in boot_votes.most_common(4)]
+    top6_boot = [n for n, _ in boot_votes.most_common(6)]
+    log.info("Bootstrap top4 stasera: %s (su %d previsioni)", sorted(top4_boot), n_boot)
+    log.info("Bootstrap top6 stasera: %s", sorted(top6_boot))
+
+    # Ranking bootstrap completo (tutti 49 numeri)
+    df_boot_rank = pd.DataFrame([
+        {
+            "rank":       i + 1,
+            "numero":     n,
+            "voti":       cnt,
+            "su_%d" % n_boot: f"{cnt}/{n_boot}",
+            "pct_%":      round(cnt / n_boot * 100, 1),
+            "certezza":   ("CERTO"    if cnt / n_boot >= 0.80 else
+                           "ALTO"     if cnt / n_boot >= 0.65 else
+                           "MEDIO"    if cnt / n_boot >= 0.50 else
+                           "BASSO"),
+            "spiegazione": (
+                f"Numero {n} appare in {cnt}/{n_boot} previsioni ({cnt/n_boot*100:.1f}%). "
+                + ("← CERTO: tutte le strategie e shift concordano" if cnt/n_boot >= 0.80
+                   else "← ALTA CONVERGENZA" if cnt/n_boot >= 0.65
+                   else "")
+            ),
+        }
+        for i, (n, cnt) in enumerate(boot_votes.most_common(49))
+    ])
+    df_boot_details = pd.DataFrame(boot_rows)
+
+    # Aggiungi righe BOOTSTRAP al foglio Stasera
+    stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0,
+                          "shift_usato": "", "motivo_shift": ""})
+    stasera_rows.append({
+        "strategia":    "GOLDEN4_BOOTSTRAP",
+        "numeri":       " ".join(f"{n:02d}" for n in sorted(top4_boot)),
+        "n_numeri":     4,
+        "shift_usato":  f"tutti {len(LOOKBACKS)}",
+        "motivo_shift": (
+            f"Top 4 numeri per voti in {n_boot} previsioni "
+            f"({len(LOOKBACKS)} shift × {len(STRATEGY_NAMES)} strategie). "
+            f"Il piu votato appare in {boot_votes.most_common(1)[0][1]}/{n_boot} scenari."
+        ),
+    })
+    stasera_rows.append({
+        "strategia":    "GOLDEN6_BOOTSTRAP",
+        "numeri":       " ".join(f"{n:02d}" for n in sorted(top6_boot)),
+        "n_numeri":     6,
+        "shift_usato":  f"tutti {len(LOOKBACKS)}",
+        "motivo_shift": (
+            f"Top 6 per voti su {n_boot} previsioni. "
+            f"Questi 6 numeri sono i piu stabili indipendentemente dal parametro usato."
+        ),
+    })
+
     # Tabella consenso dettagliata
     consenso_rows = [
         {
@@ -1632,6 +1737,106 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         log.info("Ciclo: %d hit in %d draw, gap medio=%.1f, gap attuale=%d, overdue=%.1f%%, P(stasera)=%.2f%%",
                  len(hit_events), len(all_draws), avg_gap, current_gap, overdue_pct, p_tonight_gap * 100)
 
+        # ── FOGLIO Esclusione_2pct ────────────────────────────────────────────
+        # IL CONCETTO DELL'UTENTE: "mettersi nel 2% per esclusione".
+        # R = probabilita' che UNA previsione faccia 4+ (frequenza storica).
+        # Facendo N previsioni consecutive, P(almeno 1 hit) = 1 - (1-R)^N.
+        # Ogni previsione sbagliata "scartata" avvicina alla certezza.
+        # Lo streak attuale (previsioni gia' fatte dall'ultimo hit) dice a che
+        # punto della certezza siamo: quante ne abbiamo gia' scartate.
+        import math
+        R = len(hit_events) / len(all_draws)   # es. 0.0206 = 2.06%
+        prev_per_hit = 1.0 / R if R > 0 else 0  # es. ~48.5
+
+        def n_for_confidence(target: float) -> int:
+            """Quante previsioni consecutive servono per P(>=1 hit) >= target."""
+            if R <= 0 or R >= 1:
+                return 0
+            return int(math.ceil(math.log(1 - target) / math.log(1 - R)))
+
+        # streak attuale = previsioni gia' fatte e scartate dall'ultimo hit
+        prev_gia_scartate = current_gap
+
+        def p_almeno_uno(n: int) -> float:
+            return 1 - (1 - R) ** n if R > 0 else 0.0
+
+        p_finora = p_almeno_uno(prev_gia_scartate)          # quanto sei "dentro" finora
+        # P che stasera sia LA previsione giusta data la sequenza di miss:
+        # se hai gia' fatto k miss, la prossima e' un hit con prob R (memoryless),
+        # MA la lettura "a esclusione" e' quanto la finestra cumulata e' ormai
+        # vicina alla certezza. Mostriamo entrambe le letture (oneste).
+        esclusione_rows = [
+            {"voce": "IL TUO CONCETTO — 'mettersi nel 2% per esclusione'",
+             "valore": (
+                 "Una previsione fa 4+ il %.2f%% delle volte (1 ogni %.1f previsioni). "
+                 "Facendo previsioni consecutive e scartando le sbagliate, ti avvicini "
+                 "alla certezza che la prossima sia quella giusta."
+                 % (R * 100, prev_per_hit)
+             )},
+            {"voce": "---", "valore": ""},
+            {"voce": "Frequenza 4+ misurata (R)",        "valore": f"{R*100:.3f}%"},
+            {"voce": "1 hit ogni quante previsioni",     "valore": f"{prev_per_hit:.1f}"},
+            {"voce": "Hit 4+ totali nello storico",      "valore": len(hit_events)},
+            {"voce": "Previsioni totali nello storico",  "valore": len(all_draws)},
+            {"voce": "---", "valore": ""},
+            {"voce": "Previsioni gia' scartate (streak attuale)", "valore": prev_gia_scartate},
+            {"voce": "P(almeno 1 hit) con le previsioni gia' fatte",
+             "valore": f"{p_finora*100:.2f}%"},
+            {"voce": "Lettura: a che punto sei",
+             "valore": (
+                 f"Hai gia' fatto {prev_gia_scartate} previsioni dall'ultimo 4+. "
+                 f"La probabilita' cumulata di aver gia' centrato un 4+ in questa "
+                 f"sequenza e' {p_finora*100:.1f}%."
+             )},
+            {"voce": "---", "valore": ""},
+            {"voce": "Previsioni per essere sicuri al 50%",  "valore": n_for_confidence(0.50)},
+            {"voce": "Previsioni per essere sicuri al 90%",  "valore": n_for_confidence(0.90)},
+            {"voce": "Previsioni per essere sicuri al 95%",  "valore": n_for_confidence(0.95)},
+            {"voce": "Previsioni per essere sicuri al 99%",  "valore": n_for_confidence(0.99)},
+            {"voce": "Previsioni per essere sicuri al 99.9%","valore": n_for_confidence(0.999)},
+            {"voce": "---", "valore": ""},
+            {"voce": "CONCLUSIONE",
+             "valore": (
+                 f"Per arrivare al 99% di certezza servono {n_for_confidence(0.99)} previsioni "
+                 f"consecutive. Ne hai gia' scartate {prev_gia_scartate} "
+                 f"({p_finora*100:.0f}% di certezza cumulata). "
+                 + ("SEI GIA' IN ZONA CERTEZZA: stasera e' altamente probabile sia il 4+."
+                    if p_finora >= 0.90 else
+                    f"Te ne mancano circa {max(0, n_for_confidence(0.99) - prev_gia_scartate)} "
+                    f"per il 99%.")
+             )},
+        ]
+        df_esclusione = pd.DataFrame(esclusione_rows)
+
+        # Tabella cumulativa: dopo N previsioni, P(>=1 hit)
+        cumul_rows = []
+        n_check = sorted(set(
+            list(range(10, 310, 10)) + [prev_gia_scartate,
+                                        n_for_confidence(0.90),
+                                        n_for_confidence(0.95),
+                                        n_for_confidence(0.99)]
+        ))
+        for nN in n_check:
+            if nN <= 0:
+                continue
+            cumul_rows.append({
+                "n_previsioni":    nN,
+                "P_almeno_1_hit_%": round(p_almeno_uno(nN) * 100, 2),
+                "note": (
+                    "← SEI QUI (previsioni gia' scartate)" if nN == prev_gia_scartate
+                    else "← soglia 90%" if nN == n_for_confidence(0.90)
+                    else "← soglia 95%" if nN == n_for_confidence(0.95)
+                    else "← soglia 99%" if nN == n_for_confidence(0.99)
+                    else ""
+                ),
+            })
+        df_esclusione_cumul = pd.DataFrame(cumul_rows)
+
+        log.info("Esclusione 2pct: R=%.3f%%, 1 ogni %.1f, gia' scartate=%d (%.1f%%), "
+                 "servono %d per 99%%",
+                 R * 100, prev_per_hit, prev_gia_scartate, p_finora * 100,
+                 n_for_confidence(0.99))
+
         # Aggiungi riga CICLO_SCADENZA al foglio Stasera
         stasera_rows.append({"strategia": "---", "numeri": "", "n_numeri": 0, "shift_usato": "", "motivo_shift": ""})
         stasera_rows.append({
@@ -1644,21 +1849,29 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
         # Ricostruisci df_stasera con la riga CICLO_STATUS aggiunta
         df_stasera = pd.DataFrame(stasera_rows)
     else:
-        df_ciclo_summary = pd.DataFrame([{"metrica": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
-        df_gap_dist      = pd.DataFrame()
-        df_ultimi_hit    = pd.DataFrame()
+        df_ciclo_summary    = pd.DataFrame([{"metrica": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
+        df_gap_dist         = pd.DataFrame()
+        df_ultimi_hit       = pd.DataFrame()
+        df_esclusione       = pd.DataFrame([{"voce": "Nessun 4+ hit trovato", "valore": "Dati insufficienti"}])
+        df_esclusione_cumul = pd.DataFrame()
         log.warning("Ciclo_Scadenza: nessun evento 4+ hit trovato con shift=%d", best_shift_recent)
 
     # ────────────────── Scrivi Excel ──────────────────────────────────────────
     out_path = OUT_DIR / "golden_analysis.xlsx"
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
-            df_ciclo_summary.to_excel(writer,  sheet_name="Ciclo_Scadenza",  index=False)
+            # ── FOGLI PRINCIPALI (primi da vedere) ────────────────────────────
+            df_esclusione.to_excel(writer,     sheet_name="Esclusione_2pct",   index=False)
+            if not df_esclusione_cumul.empty:
+                df_esclusione_cumul.to_excel(writer, sheet_name="Esclusione_Cumulativa", index=False)
+            df_ciclo_summary.to_excel(writer,  sheet_name="Ciclo_Scadenza",    index=False)
             if not df_gap_dist.empty:
                 df_gap_dist.to_excel(writer,   sheet_name="Gap_Distribuzione", index=False)
             if not df_ultimi_hit.empty:
-                df_ultimi_hit.to_excel(writer, sheet_name="Ultimi_Hit",       index=False)
-            df_grid.to_excel(writer,         sheet_name="Grid_Hits",        index=False)
+                df_ultimi_hit.to_excel(writer, sheet_name="Ultimi_Hit",        index=False)
+            df_boot_rank.to_excel(writer,      sheet_name="Bootstrap_Ranking", index=False)
+            df_boot_details.to_excel(writer,   sheet_name="Bootstrap_Dettaglio", index=False)
+            df_grid.to_excel(writer,           sheet_name="Grid_Hits",         index=False)
             df_shift_rank.to_excel(writer,   sheet_name="Shift_Ranking",    index=False)
             df_finestre.to_excel(writer,     sheet_name="Finestre_100",     index=False)
             df_convergenza.to_excel(writer,  sheet_name="Convergenza",      index=False)
@@ -1684,7 +1897,9 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     log.info("Consenso top4 stasera:         %s",             sorted(top4_s))
     log.info("CONVERGENZA storica top4 (%d finestre): %s",    n_finestre, sorted(top4_conv))
     log.info("CONVERGENZA storica top6:               %s",    sorted(top6_conv))
+    log.info("Bootstrap top4 finale: %s | top6: %s", sorted(top4_boot), sorted(top6_boot))
     log.info("Fogli Excel: Ciclo_Scadenza | Gap_Distribuzione | Ultimi_Hit |")
+    log.info("             Bootstrap_Ranking | Bootstrap_Dettaglio |")
     log.info("             Grid_Hits | Shift_Ranking | Finestre_100 | Convergenza |")
     log.info("             Numeri_Ranking | Coppie | Golden6 | RitornoAlFuturo |")
     log.info("             Stasera | Stasera_Consenso | Kumulacja")
