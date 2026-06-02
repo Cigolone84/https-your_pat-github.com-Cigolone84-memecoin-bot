@@ -1009,12 +1009,18 @@ def run_deep_analysis(args: argparse.Namespace) -> None:
     MIN_HIT     = 4
 
     # ── Mappa draw_num -> numeri reali ────────────────────────────────────────
+    # load_draws() restituisce sempre la colonna "actual" (frozenset), non "Numeri Reali"
     actual_by_draw: dict[int, frozenset] = {}
     for _, row in df.iterrows():
         d = int(row.get("draw", 0))
-        nums = parse_nums(row.get("Numeri Reali", ""))
-        if len(nums) == 6:
-            actual_by_draw[d] = nums
+        act = row.get("actual", None)
+        if isinstance(act, frozenset) and len(act) == 6:
+            actual_by_draw[d] = act
+        else:
+            # fallback per DataFrame caricati direttamente da Excel con colonna "Numeri Reali"
+            nums = parse_nums(row.get("Numeri Reali", ""))
+            if len(nums) == 6:
+                actual_by_draw[d] = nums
 
     # ── Esegui backtest per ogni shift (UNA SOLA VOLTA per shift) ────────────
     log.info("Fase 1/3: backtest per %d shift...", len(LOOKBACKS))
